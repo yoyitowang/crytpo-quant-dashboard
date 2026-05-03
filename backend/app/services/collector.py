@@ -82,7 +82,7 @@ class DataCollector:
         for _ in range(15): asyncio.create_task(self._worker())
         for name, handler in self.exchanges.items():
             asyncio.create_task(self._safe_handler(name, handler))
-        logger.info("Universal Data Processor v18.3 Online.")
+        logger.info("Universal Data Processor v18.6 Online.")
         while True: await asyncio.sleep(3600)
 
     async def _safe_handler(self, name: str, handler: Callable):
@@ -108,29 +108,42 @@ class DataCollector:
                 except: await asyncio.sleep(10)
 
     async def _coinw_handler(self):
-        # 1. 抓取所有可能存在的 Ticker 作為種子
-        seed_url = "https://api.coinw.com/api/v1/public?command=returnTicker"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(seed_url) as resp:
-                res_data = await resp.json()
-                all_raw_syms = res_data.get('data', {}).keys()
-                all_pairs = list(set([s.split('_')[0] for s in all_raw_syms if 'USDT' in s]))
-        
+        # --- 核心：利用 CCXT 精確探測全市場期貨幣種 ---
         wss_url = "wss://ws.futurescw.com/perpum"
-        # 修正：extra_headers 格式應為 dict 或 list of tuples
-        extra_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         
-        async with websockets.connect(wss_url, extra_headers=extra_headers, ping_interval=15) as ws:
-            # 2. 分批訂閱
-            for i in range(0, len(all_pairs), 30):
-                batch = all_pairs[i:i+30]
+        async def get_all_futures():
+            try:
+                # 使用 CCXT 4.5.51+ 正確加載 CoinW 合約清單
+                import ccxt.async_support as ccxt_async
+                exchange = ccxt_async.coinw()
+                markets = await exchange.load_markets()
+                # 篩選 Swap 且結算為 USDT 的幣種
+                futures = [m['base'] for m in markets.values() if m.get('swap') and m.get('settle') == 'USDT']
+                await exchange.close()
+                return list(set(futures))
+            except Exception as e:
+                logger.error(f"CoinW CCXT Discovery failed: {e}")
+                # 備援機制：至少包含主流與用戶要求
+                return ["BTC", "ETH", "SOL", "CHIP", "LUNC", "DOGE", "PEPE"]
+
+        additional_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        
+        async with websockets.connect(wss_url, additional_headers=additional_headers, ping_interval=15) as ws:
+            pairs = await get_all_futures()
+            # 確保 CHIP 在清單中
+            if "CHIP" not in [p.upper() for p in pairs]:
+                pairs.append("CHIP")
+                
+            logger.info(f"CoinW Discovery Success: Subscribing to {len(pairs)} Pure Futures.")
+
+            # 分批訂閱
+            for i in range(0, len(pairs), 40):
+                batch = pairs[i:i+40]
                 for p in batch:
                     sub_msg = {"event": "sub", "params": {"biz": "futures", "type": "funding_rate", "pairCode": p}}
                     await ws.send(json.dumps(sub_msg))
                 await asyncio.sleep(1)
-            
-            logger.info(f"Connected: CoinW V2 WSS ({len(all_pairs)} symbols)")
             
             while True:
                 msg = await ws.recv()
@@ -138,11 +151,18 @@ class DataCollector:
                 if data.get("type") == "funding_rate" and "data" in data:
                     res = data["data"]
                     if "r" in res:
+                        # 過期過濾
+                        next_settle_ms = res.get("nt")
+                        if next_settle_ms:
+                            next_settle_dt = datetime.fromtimestamp(next_settle_ms / 1000)
+                            if next_settle_dt < datetime.now().replace(tzinfo=None):
+                                continue
+                        
                         await self._notify_callbacks({
                             "exchange": "coinw",
                             "symbol": f"{data.get('pairCode', '').upper()}USDT",
                             "rate": float(res["r"]),
-                            "settlement_time": datetime.fromtimestamp(res["nt"] / 1000) if res.get("nt") else None,
+                            "settlement_time": next_settle_dt if next_settle_ms else None,
                             "timestamp": datetime.utcnow()
                         })
 

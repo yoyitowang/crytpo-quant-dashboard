@@ -4,6 +4,7 @@ import logging
 import websockets
 import aiohttp
 import re
+import ccxt as ccxt_sync
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Callable
 
@@ -32,14 +33,12 @@ class DataCollector:
 
     async def _notify_callbacks(self, data: Any):
         try:
-            # --- 全局過濾：檢查數據是否過期 ---
             items = data if isinstance(data, list) else [data]
             fresh_items = []
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             
             for item in items:
                 settle_time = item.get('settlement_time')
-                # 如果有結算時間，且結算時間已過，則視為過期
                 if settle_time and isinstance(settle_time, datetime):
                     if settle_time < now:
                         continue
@@ -83,7 +82,7 @@ class DataCollector:
         for _ in range(15): asyncio.create_task(self._worker())
         for name, handler in self.exchanges.items():
             asyncio.create_task(self._safe_handler(name, handler))
-        logger.info("Universal Data Processor v17.0 (Global Filter) Active.")
+        logger.info("Universal Data Processor v18.3 Online.")
         while True: await asyncio.sleep(3600)
 
     async def _safe_handler(self, name: str, handler: Callable):
@@ -109,25 +108,29 @@ class DataCollector:
                 except: await asyncio.sleep(10)
 
     async def _coinw_handler(self):
-        # 1. 抓取所有可能存在的 Ticker 作為種子 (全量掃描)
+        # 1. 抓取所有可能存在的 Ticker 作為種子
         seed_url = "https://api.coinw.com/api/v1/public?command=returnTicker"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(seed_url) as resp:
                 res_data = await resp.json()
                 all_raw_syms = res_data.get('data', {}).keys()
-                # 抓取所有 USDT 幣種，不設上限
                 all_pairs = list(set([s.split('_')[0] for s in all_raw_syms if 'USDT' in s]))
         
         wss_url = "wss://ws.futurescw.com/perpum"
-        async with websockets.connect(wss_url, additional_headers=headers, ping_interval=15) as ws:
-            # 2. 分批訂閱 (全量)
+        # 修正：extra_headers 格式應為 dict 或 list of tuples
+        extra_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        
+        async with websockets.connect(wss_url, extra_headers=extra_headers, ping_interval=15) as ws:
+            # 2. 分批訂閱
             for i in range(0, len(all_pairs), 30):
                 batch = all_pairs[i:i+30]
                 for p in batch:
                     sub_msg = {"event": "sub", "params": {"biz": "futures", "type": "funding_rate", "pairCode": p}}
                     await ws.send(json.dumps(sub_msg))
                 await asyncio.sleep(1)
+            
+            logger.info(f"Connected: CoinW V2 WSS ({len(all_pairs)} symbols)")
             
             while True:
                 msg = await ws.recv()
@@ -195,7 +198,6 @@ class DataCollector:
                         if res.get('data'):
                             for item in res['data']:
                                 if 'USDT' in item.get('symbol', ''):
-                                    # KuCoin REST 沒有明確的 nextFundingTime，但通常 WSS 會推
                                     await self._notify_callbacks({
                                         "exchange": "kucoin", "symbol": item['symbol'],
                                         "rate": float(item.get('fundingFeeRate') or 0), "settlement_time": None, "timestamp": datetime.utcnow()

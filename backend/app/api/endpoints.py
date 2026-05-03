@@ -105,6 +105,43 @@ async def get_aggregated_history(
         
     return result
 
+@router.get("/rates/history/{exchange}/{symbol}")
+async def get_historical_rates(
+    exchange: str, symbol: str, days: int = 7, db: AsyncSession = Depends(get_db)
+):
+    """獲取單一交易所歷史資料：先查 DB，若無資料則向交易所 API 請求。"""
+    start_time = datetime.utcnow() - timedelta(days=days)
+    
+    trunc_func = func.date_trunc('hour', FundingRate.timestamp)
+    query_agg = select(
+        trunc_func.label('ts'),
+        func.avg(FundingRate.rate).label('rate')
+    ).where(
+        FundingRate.exchange == exchange, FundingRate.symbol == symbol, FundingRate.timestamp >= start_time
+    ).group_by(trunc_func).order_by(trunc_func.asc())
+    
+    res_agg = await db.execute(query_agg)
+    db_data = [{"timestamp": r.ts.isoformat(), "rate": float(r.rate)} for r in res_agg.all()]
+
+    if len(db_data) < 5:
+        try:
+            ex_id = exchange.lower()
+            if hasattr(ccxt_async, ex_id):
+                ex_class = getattr(ccxt_async, ex_id)()
+                if ex_class.has.get('fetchFundingRateHistory'):
+                    match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+                    ccxt_sym = f"{match.group(1)}/{match.group(2)}" if match else symbol
+                    
+                    hist = await ex_class.fetch_funding_rate_history(ccxt_sym, since=int(start_time.timestamp()*1000))
+                    api_data = [{"timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(), "rate": h['fundingRate']} for h in hist]
+                    await ex_class.close()
+                    return sorted(api_data, key=lambda x: x['timestamp'])
+                await ex_class.close()
+        except Exception as e:
+            logger.warning(f"Fallback history fetch failed for {exchange}: {e}")
+            
+    return sorted(db_data, key=lambda x: x['timestamp'])
+
 @router.get("/analysis/spreads")
 async def get_funding_spreads():
     latest = collector.latest_rates.values()

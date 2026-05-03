@@ -46,21 +46,26 @@ const TVChart = ({ data, colors, isCompare = false }: { data: any, colors?: stri
                 lineSeries.setData(sorted);
             });
         } else {
-            // 單交易所模式 (Area Series with Baseline)
-            const areaSeries = chart.addAreaSeries({
-                lineColor: '#2563eb',
-                topColor: 'rgba(37, 99, 235, 0.4)',
-                bottomColor: 'rgba(37, 99, 235, 0)',
+            // 單交易所模式 (Baseline Series: 專業綠紅區分)
+            const baselineSeries = chart.addBaselineSeries({
+                baseValue: { type: 'price', value: 0 },
+                topLineColor: '#10b981', // 綠色 (正值)
+                topFillColor1: 'rgba(16, 185, 129, 0.4)',
+                topFillColor2: 'rgba(16, 185, 129, 0.05)',
+                bottomLineColor: '#ef4444', // 紅色 (負值)
+                bottomFillColor1: 'rgba(239, 68, 68, 0.05)',
+                bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
                 lineWidth: 3,
                 priceFormat: { type: 'percent', precision: 5, minMove: 0.00001 }
             });
+
             const sorted = [...data].sort((a: any, b: any) => {
                 const t1 = new Date(a.timestamp).getTime() / 1000;
                 const t2 = new Date(b.timestamp).getTime() / 1000;
                 return t1 - t2;
             }).map(d => ({ time: new Date(d.timestamp).getTime() / 1000 as any, value: d.rate }));
             
-            areaSeries.setData(sorted);
+            baselineSeries.setData(sorted);
         }
 
         chart.timeScale().fitContent();

@@ -75,43 +75,35 @@ async def get_market_summary():
     except Exception as e:
         return {}
 
-@router.get("/rates/history/{exchange}/{symbol}")
-async def get_historical_rates(
-    exchange: str, symbol: str, days: int = 7, db: AsyncSession = Depends(get_db)
+@router.get("/rates/history_all/{symbol}")
+async def get_aggregated_history(
+    symbol: str, days: int = 7, db: AsyncSession = Depends(get_db)
 ):
-    """獲取歷史資料：先查 DB，若無資料則向交易所 API 請求。"""
+    """聚合查詢：獲取該幣種在所有交易所的歷史，用於 Modal 比對。"""
     start_time = datetime.utcnow() - timedelta(days=days)
     
+    # 使用資料庫查詢所有相關交易所的歷史
     trunc_func = func.date_trunc('hour', FundingRate.timestamp)
-    query_agg = select(
+    query = select(
+        FundingRate.exchange,
         trunc_func.label('ts'),
         func.avg(FundingRate.rate).label('rate')
     ).where(
-        FundingRate.exchange == exchange, FundingRate.symbol == symbol, FundingRate.timestamp >= start_time
-    ).group_by(trunc_func).order_by(trunc_func.asc())
+        FundingRate.symbol == symbol, 
+        FundingRate.timestamp >= start_time
+    ).group_by(FundingRate.exchange, trunc_func).order_by(trunc_func.asc())
     
-    res_agg = await db.execute(query_agg)
-    db_data = [{"timestamp": r.ts.isoformat(), "rate": float(r.rate)} for r in res_agg.all()]
-
-    if len(db_data) < 5:
-        try:
-            ex_id = exchange.lower()
-            if hasattr(ccxt_async, ex_id):
-                ex_class = getattr(ccxt_async, ex_id)()
-                if ex_class.has.get('fetchFundingRateHistory'):
-                    # 修復：使用 Python 正則表達式
-                    match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
-                    ccxt_sym = f"{match.group(1)}/{match.group(2)}" if match else symbol
-                    
-                    hist = await ex_class.fetch_funding_rate_history(ccxt_sym, since=int(start_time.timestamp()*1000))
-                    api_data = [{"timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(), "rate": h['fundingRate']} for h in hist]
-                    await ex_class.close()
-                    return sorted(api_data, key=lambda x: x['timestamp'])
-                await ex_class.close()
-        except Exception as e:
-            logger.warning(f"Fallback history fetch failed for {exchange}: {e}")
-            
-    return sorted(db_data, key=lambda x: x['timestamp'])
+    res = await db.execute(query)
+    rows = res.all()
+    
+    # 格式化為前端易用的結構：{ "binance": [...], "okx": [...] }
+    result = {}
+    for r in rows:
+        ex = r.exchange
+        if ex not in result: result[ex] = []
+        result[ex].append({"time": int(r.ts.timestamp()), "value": float(r.rate)})
+        
+    return result
 
 @router.get("/analysis/spreads")
 async def get_funding_spreads():

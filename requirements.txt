@@ -1,16 +1,11 @@
-# --- 核心資料採集 ---
-ccxt>=4.4.0           # 統一各大交易所 REST/WSS API 的神器
-websockets>=12.0      # 高效能 Python 原生 WebSocket 套件
-
-# --- Web 框架 ---
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-
-# --- 資料庫與快取 ---
-redis>=5.0.0          # 操作 Redis 快取，用於即時更新前端資料
-asyncpg>=0.29.0       # 高效能的非同步 PostgreSQL 驅動 (適合搭配 asyncio)
-sqlalchemy[asyncio]>=2.0.0
-
-# --- 環境變數與工具 ---
-python-dotenv>=1.0.0  # 用於讀取 .env 檔，保護你的資料庫密碼或 API Key
-pydantic-settings>=2.2.0
+fastapi==0.110.0
+uvicorn==0.27.1
+sqlalchemy==2.0.28
+asyncpg==0.29.0
+websockets==12.0
+aiohttp==3.9.3
+redis==5.0.3
+ccxt==4.2.56
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+psycopg2-binary==2.9.9

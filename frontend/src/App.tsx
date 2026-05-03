@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X } from 'lucide-react';
-import { createChart, ColorType, IChartApi, ISeriesApi } from 'lightweight-charts';
+import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff } from 'lucide-react';
+import { createChart, ColorType, IChartApi } from 'lightweight-charts';
 
 interface FundingRate {
   exchange: string;
@@ -17,8 +17,8 @@ const EXCHANGE_COLORS: Record<string, string> = {
 
 const ALL_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'gate', 'kucoin', 'coinw', 'mexc', 'bingx'];
 
-// --- TradingView 專業圖表組件 ---
-const TVChart = ({ data, colors, isCompare = false }: { data: any, colors?: string[], isCompare?: boolean }) => {
+// --- TradingView 專業圖表組件 (支援動態隱藏) ---
+const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: { data: any, isCompare?: boolean, visibleExchanges?: string[] }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
 
@@ -34,37 +34,32 @@ const TVChart = ({ data, colors, isCompare = false }: { data: any, colors?: stri
         });
 
         if (isCompare) {
-            // 多交易所比對模式 (Line Series)
-            Object.keys(data).forEach((ex, idx) => {
+            // 多交易所比對模式
+            Object.keys(data).forEach((ex) => {
                 const lineSeries = chart.addLineSeries({
                     color: EXCHANGE_COLORS[ex] || '#888',
                     lineWidth: 2,
                     title: ex.toUpperCase(),
+                    // 核心功能：根據狀態決定是否顯示
+                    visible: visibleExchanges.includes(ex),
                 });
-                // 將後端時間戳轉換為秒，並確保排序
                 const sorted = data[ex].sort((a:any, b:any) => a.time - b.time);
                 lineSeries.setData(sorted);
             });
         } else {
-            // 單交易所模式 (Baseline Series: 專業綠紅區分)
+            // 單交易所模式 (Baseline)
             const baselineSeries = chart.addBaselineSeries({
                 baseValue: { type: 'price', value: 0 },
-                topLineColor: '#10b981', // 綠色 (正值)
-                topFillColor1: 'rgba(16, 185, 129, 0.4)',
-                topFillColor2: 'rgba(16, 185, 129, 0.05)',
-                bottomLineColor: '#ef4444', // 紅色 (負值)
-                bottomFillColor1: 'rgba(239, 68, 68, 0.05)',
-                bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
+                topLineColor: '#10b981', topFillColor1: 'rgba(16, 185, 129, 0.4)', topFillColor2: 'rgba(16, 185, 129, 0.05)',
+                bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239, 68, 68, 0.05)', bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
                 lineWidth: 3,
                 priceFormat: { type: 'percent', precision: 5, minMove: 0.00001 }
             });
-
             const sorted = [...data].sort((a: any, b: any) => {
                 const t1 = new Date(a.timestamp).getTime() / 1000;
                 const t2 = new Date(b.timestamp).getTime() / 1000;
                 return t1 - t2;
             }).map(d => ({ time: new Date(d.timestamp).getTime() / 1000 as any, value: d.rate }));
-            
             baselineSeries.setData(sorted);
         }
 
@@ -74,7 +69,7 @@ const TVChart = ({ data, colors, isCompare = false }: { data: any, colors?: stri
         const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
         window.addEventListener('resize', handleResize);
         return () => { window.removeEventListener('resize', handleResize); chart.remove(); };
-    }, [data, isCompare]);
+    }, [data, isCompare, visibleExchanges]); // 監聽 visibleExchanges 變化
 
     return <div ref={containerRef} className="w-full" />;
 };
@@ -87,6 +82,7 @@ function App() {
   const [multiHistory, setMultiHistory] = useState<any>(null);
   const [selectedPair, setSelectedPair] = useState<{exchange: string, symbol: string} | null>(null);
   const [compareSymbol, setCompareSymbol] = useState<string | null>(null);
+  const [visibleExchanges, setVisibleExchanges] = useState<string[]>(ALL_EXCHANGES);
   const [connected, setConnected] = useState(false);
   const [viewMode, setViewMode] = useState<'matrix' | 'heatplot'>('matrix');
   const [search, setSearch] = useState('');
@@ -135,7 +131,6 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // 獲取歷史
   useEffect(() => {
     if (selectedPair) {
         fetch(`/api/rates/history/${selectedPair.exchange}/${selectedPair.symbol}`)
@@ -144,12 +139,12 @@ function App() {
     }
   }, [selectedPair]);
 
-  // 獲取聚合歷史 (Modal)
   useEffect(() => {
     if (compareSymbol) {
         fetch(`/api/rates/history_all/${compareSymbol}`)
             .then(res => res.json())
             .then(setMultiHistory);
+        setVisibleExchanges(ALL_EXCHANGES); // 開啟 Modal 時重置顯示
     } else { setMultiHistory(null); }
   }, [compareSymbol]);
 
@@ -187,13 +182,17 @@ function App() {
     setPage(1);
   };
 
+  const toggleExchangeVisibility = (ex: string) => {
+    setVisibleExchanges(prev => prev.includes(ex) ? prev.filter(e => e !== ex) : [...prev, ex]);
+  };
+
   return (
     <div className="min-h-screen bg-[#000] text-gray-400 font-sans selection:bg-blue-500/30">
       <nav className="bg-[#080808] border-b border-gray-900 sticky top-0 z-50 px-6 py-3 flex flex-wrap justify-between items-center gap-4 shadow-2xl">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <Zap size={22} className="text-blue-500 fill-blue-500" />
-            <h1 className="text-xl font-black text-white italic tracking-tighter uppercase">QuantMatrix v11.5</h1>
+            <h1 className="text-xl font-black text-white italic tracking-tighter uppercase">QuantMatrix v11.6</h1>
           </div>
           <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800">
              <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
@@ -210,7 +209,6 @@ function App() {
       </nav>
 
       <main className="max-w-[1800px] mx-auto p-6">
-        {/* 1. 頂部統計 */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
             <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg relative group">
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Market Sentiment</div>
@@ -226,7 +224,7 @@ function App() {
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingUp size={12} className="text-green-500"/> Top Payers</div>
                 <div className="space-y-1.5">{summary?.top_positive?.map((r:any, i:number) => (
                     <div key={i} className="flex justify-between items-center text-[11px]">
-                        <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-blue-900/30 text-blue-400 px-1 rounded ml-1">{r.exchange}</span></span>
+                        <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-blue-900/30 text-blue-400 px-1 rounded ml-1 uppercase">{r.exchange}</span></span>
                         <span className="font-black text-green-400">{(r.rate * 100).toFixed(4)}%</span>
                     </div>
                 ))}</div>
@@ -235,7 +233,7 @@ function App() {
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingDown size={12} className="text-red-500"/> Top Receivers</div>
                 <div className="space-y-1.5">{summary?.top_negative?.map((r:any, i:number) => (
                     <div key={i} className="flex justify-between items-center text-[11px]">
-                        <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-red-900/30 text-red-400 px-1 rounded ml-1">{r.exchange}</span></span>
+                        <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-red-900/30 text-red-400 px-1 rounded ml-1 uppercase">{r.exchange}</span></span>
                         <span className="font-black text-red-400">{(r.rate * 100).toFixed(4)}%</span>
                     </div>
                 ))}</div>
@@ -247,7 +245,6 @@ function App() {
             </div>
         </div>
 
-        {/* 2. 歷史圖表 (移動到這裡：統計下方) */}
         {selectedPair && history.length > 0 && (
             <div className="mb-8 animate-in zoom-in-95 duration-500">
                 <div className="bg-[#080808] border border-blue-900/30 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
@@ -256,20 +253,17 @@ function App() {
                         <div className="flex items-center gap-4">
                             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white"><BarChart3 size={20} /></div>
                             <div>
-                                <h3 className="text-xl font-black text-white uppercase italic tracking-tighter">{selectedPair.symbol} <span className="text-blue-500 text-sm">{selectedPair.exchange}</span></h3>
+                                <h3 className="text-xl font-black text-white uppercase italic tracking-tighter">{selectedPair.symbol} <span className="text-blue-500 text-sm uppercase">{selectedPair.exchange}</span></h3>
                                 <p className="text-[9px] font-bold text-gray-600 uppercase tracking-[0.2em]">Institutional Historical Analysis</p>
                             </div>
                         </div>
                         <button onClick={() => setSelectedPair(null)} className="text-gray-600 hover:text-white transition-colors"><X size={20}/></button>
                     </div>
-                    <div className="h-[350px] w-full">
-                        <TVChart data={history} />
-                    </div>
+                    <div className="h-[350px] w-full"><TVChart data={history} /></div>
                 </div>
             </div>
         )}
 
-        {/* 3. 交易所選擇 */}
         <div className="flex flex-wrap items-center gap-3 mb-6 bg-[#080808] p-3 rounded-xl border border-gray-900">
             {ALL_EXCHANGES.map(ex => (
                 <button key={ex} onClick={() => { setSelectedExchanges(prev => prev.includes(ex) ? prev.filter(e => e !== ex) : [...prev, ex]); setPage(1); }} className={`text-[10px] font-black uppercase flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${selectedExchanges.includes(ex) ? 'bg-blue-600/10 text-blue-400 border border-blue-900/30' : 'text-gray-700 border border-transparent'}`}>
@@ -278,7 +272,6 @@ function App() {
             ))}
         </div>
 
-        {/* 4. 矩陣表格 */}
         <div className="bg-[#0a0a0a] rounded-2xl border border-gray-900 overflow-hidden shadow-2xl">
             <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse table-fixed min-w-[1200px]">
@@ -325,7 +318,7 @@ function App() {
             </div>
             <div className="bg-[#0f0f0f] border-t border-gray-900 px-8 py-4 flex justify-between items-center text-[10px] font-black text-gray-700 uppercase tracking-widest">
                 <div className="flex gap-4 items-center">
-                    <span>{filteredData.length} Assets</span>
+                    <span>{filteredData.length} Assets Loaded</span>
                     <div className="flex gap-2">
                         {[25, 50, 100].map(s => <button key={s} onClick={() => {setPageSize(s); setPage(1);}} className={pageSize === s ? 'text-white underline' : 'hover:text-gray-500'}>{s}</button>)}
                     </div>
@@ -338,41 +331,58 @@ function App() {
             </div>
         </div>
 
-        {/* 5. 全平台比對 Modal */}
         {compareSymbol && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/90 backdrop-blur-sm animate-in fade-in duration-300">
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/95 backdrop-blur-md animate-in fade-in duration-300">
                 <div className="bg-[#080808] border border-gray-800 w-full max-w-6xl rounded-[40px] shadow-3xl overflow-hidden relative">
                     <div className="h-2 bg-gradient-to-r from-blue-600 via-purple-600 to-red-600"></div>
                     <button onClick={() => setCompareSymbol(null)} className="absolute right-8 top-8 text-gray-500 hover:text-white bg-[#111] p-3 rounded-full border border-gray-800 transition-all z-50">
                         <X size={24}/>
                     </button>
                     <div className="p-12">
-                        <div className="flex items-end gap-6 mb-12">
-                            <div className="w-20 h-20 bg-white/5 rounded-3xl flex items-center justify-center border border-white/10 shadow-inner"><Globe size={40} className="text-blue-500" /></div>
-                            <div>
-                                <h2 className="text-6xl font-black text-white italic tracking-tighter uppercase leading-none mb-2">{compareSymbol}</h2>
-                                <p className="text-xs font-black text-gray-600 uppercase tracking-[0.5em]">Cross-Exchange Comparative History</p>
+                        <div className="flex items-end justify-between gap-6 mb-12">
+                            <div className="flex items-end gap-6">
+                                <div className="w-20 h-20 bg-white/5 rounded-3xl flex items-center justify-center border border-white/10 shadow-inner"><Globe size={40} className="text-blue-500" /></div>
+                                <div>
+                                    <h2 className="text-6xl font-black text-white italic tracking-tighter uppercase leading-none mb-2">{compareSymbol}</h2>
+                                    <p className="text-xs font-black text-gray-600 uppercase tracking-[0.5em]">Cross-Exchange Comparative History</p>
+                                </div>
+                            </div>
+                            <div className="text-right">
+                                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Visibility</div>
+                                <div className="flex gap-2">
+                                    <button onClick={() => setVisibleExchanges(ALL_EXCHANGES)} className="text-[9px] bg-[#111] px-3 py-1 rounded-full border border-gray-800 hover:text-white uppercase font-bold">Show All</button>
+                                    <button onClick={() => setVisibleExchanges([])} className="text-[9px] bg-[#111] px-3 py-1 rounded-full border border-gray-800 hover:text-white uppercase font-bold">Hide All</button>
+                                </div>
                             </div>
                         </div>
                         
-                        <div className="bg-[#040404] rounded-[32px] p-8 border border-gray-900 shadow-inner min-h-[500px] flex items-center justify-center">
+                        <div className="bg-[#040404] rounded-[32px] p-8 border border-gray-900 shadow-inner min-h-[500px] flex items-center justify-center relative">
                             {multiHistory ? (
-                                <TVChart data={multiHistory} isCompare={true} />
+                                <TVChart data={multiHistory} isCompare={true} visibleExchanges={visibleExchanges} />
                             ) : (
                                 <div className="flex flex-col items-center gap-4 text-gray-700 font-black uppercase tracking-widest animate-pulse">
                                     <Activity className="animate-spin text-blue-500" />
-                                    Synthesizing Global Data...
+                                    Synthesizing Global Market Data...
                                 </div>
                             )}
                         </div>
 
-                        <div className="mt-8 flex flex-wrap justify-center gap-6">
-                            {multiHistory && Object.keys(multiHistory).map(ex => (
-                                <div key={ex} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-gray-500">
-                                    <div className="w-3 h-1 rounded-full" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}></div>
-                                    {ex}
-                                </div>
-                            ))}
+                        <div className="mt-8 flex flex-wrap justify-center gap-4">
+                            {multiHistory && Object.keys(multiHistory).map(ex => {
+                                const isVisible = visibleExchanges.includes(ex);
+                                return (
+                                    <button 
+                                        key={ex} 
+                                        onClick={() => toggleExchangeVisibility(ex)}
+                                        className={`flex items-center gap-3 px-4 py-2 rounded-2xl border transition-all ${isVisible ? 'bg-white/[0.03] border-gray-800 opacity-100 shadow-lg' : 'border-transparent opacity-20 grayscale'}`}
+                                    >
+                                        <div className="w-4 h-4 rounded-full flex items-center justify-center" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}>
+                                            {isVisible ? <Eye size={8} className="text-black" /> : <EyeOff size={8} className="text-black" />}
+                                        </div>
+                                        <span className="text-[11px] font-black uppercase tracking-widest" style={{ color: isVisible ? '#fff' : '#888' }}>{ex}</span>
+                                    </button>
+                                );
+                            })}
                         </div>
                     </div>
                 </div>

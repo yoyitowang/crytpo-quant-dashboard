@@ -182,6 +182,11 @@ function App() {
   const currentSymbols = filteredData.slice((page - 1) * pageSize, page * pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
 
+  const handleSort = (key: string) => {
+    setSortConfig(prev => ({ key, direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc' }));
+    setPage(1);
+  };
+
   return (
     <div className="min-h-screen bg-[#000] text-gray-400 font-sans selection:bg-blue-500/30">
       <nav className="bg-[#080808] border-b border-gray-900 sticky top-0 z-50 px-6 py-3 flex flex-wrap justify-between items-center gap-4 shadow-2xl">

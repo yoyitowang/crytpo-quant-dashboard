@@ -1,5 +1,5 @@
 # --- 核心資料採集 ---
-ccxt>=4.2.0           # 統一各大交易所 REST/WSS API 的神器
+ccxt>=4.4.0           # 統一各大交易所 REST/WSS API 的神器
 websockets>=12.0      # 高效能 Python 原生 WebSocket 套件
 
 # --- Web 框架 ---

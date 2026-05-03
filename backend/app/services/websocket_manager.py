@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.broadcast_count = 0
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -19,8 +20,10 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
             logger.info(f"Client disconnected. Total clients: {len(self.active_connections)}")
 
-    async def broadcast(self, message: Dict[str, Any]):
-        # Convert datetime objects to string for JSON serialization
+    async def broadcast(self, message: Any):
+        if not self.active_connections:
+            return
+
         class DateTimeEncoder(json.JSONEncoder):
             def default(self, obj):
                 from datetime import datetime
@@ -31,9 +34,13 @@ class ConnectionManager:
         try:
             encoded_msg = json.dumps(message, cls=DateTimeEncoder)
         except Exception as e:
-            logger.error(f"Failed to encode broadcast message: {e}")
+            logger.error(f"Broadcast Encode Error: {e}")
             return
         
+        self.broadcast_count += 1
+        if self.broadcast_count % 100 == 0:
+            logger.info(f"Broadcast Check: Sent {self.broadcast_count} batches to {len(self.active_connections)} clients.")
+
         disconnected = []
         for connection in self.active_connections:
             try:

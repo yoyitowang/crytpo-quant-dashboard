@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor } from 'lucide-react';
+import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, AreaChart, Area } from 'recharts';
 
 interface FundingRate {
   exchange: string;
@@ -19,11 +19,19 @@ interface Summary {
     total_symbols: number;
 }
 
-const ALL_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'gate', 'kucoin'];
+interface SystemHealth {
+    status: string;
+    last_update: string;
+    active_exchanges: string[];
+    symbols_tracked: number;
+}
+
+const ALL_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'gate', 'kucoin', 'coinw', 'mexc', 'bingx'];
 
 function App() {
   const [rates, setRates] = useState<Record<string, FundingRate>>({});
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [health, setHealth] = useState<SystemHealth | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [selectedPair, setSelectedPair] = useState<{exchange: string, symbol: string} | null>(null);
   const [connected, setConnected] = useState(false);
@@ -36,18 +44,48 @@ function App() {
   const [page, setPage] = useState(1);
   const [sortConfig, setSortConfig] = useState<{key: string, direction: 'asc' | 'desc'}>({key: 'spread', direction: 'desc'});
 
-  // WebSocket 連線
+  const formatLocalTime = (isoStr: string | undefined) => {
+    if (!isoStr || isoStr === "None") return "--:--:--";
+    try {
+        const date = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
+        return date.toLocaleString();
+    } catch (e) { return isoStr; }
+  };
+
+  // --- WebSocket 數據處理器：核心修復版本 ---
   const connectWebSocket = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const ws = new WebSocket(`${protocol}//${host}/api/ws`);
-    ws.onopen = () => setConnected(true);
+    const wsUrl = `${protocol}//${window.location.host}/api/ws`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        console.log("Terminal: WS Handshake Success.");
+        setConnected(true);
+    };
+
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setRates((prev) => ({ ...prev, [`${data.exchange}:${data.symbol}`]: data }));
+        
+        // 支援批次包與單筆數據
+        const items = Array.isArray(data) ? data : [data];
+        
+        setRates((prev) => {
+            const next = { ...prev };
+            let hasChange = false;
+            items.forEach(item => {
+                // 確保數據格式正確
+                if (item && item.exchange && item.symbol) {
+                    const key = `${item.exchange}:${item.symbol}`;
+                    next[key] = item;
+                    hasChange = true;
+                }
+            });
+            return hasChange ? next : prev;
+        });
       } catch (e) { console.error("WS Parse Error", e); }
     };
+
     ws.onclose = () => { setConnected(false); setTimeout(connectWebSocket, 3000); };
     return ws;
   }, []);
@@ -57,20 +95,22 @@ function App() {
     return () => ws.close();
   }, [connectWebSocket]);
 
-  // 定期抓取摘要
+  // 定期抓取摘要與健康檢查
   useEffect(() => {
-    const fetchSummary = () => {
-        fetch('/api/analysis/summary')
-            .then(res => res.json())
-            .then(data => setSummary(data))
-            .catch(err => console.error("Summary error", err));
+    const fetchData = async () => {
+        try {
+            const sumRes = await fetch('/api/analysis/summary');
+            if (sumRes.ok) setSummary(await sumRes.json());
+            const healthRes = await fetch('/api/health');
+            if (healthRes.ok) setHealth(await healthRes.json());
+        } catch (e) { console.error("Dashboard sync error", e); }
     };
-    fetchSummary();
-    const interval = setInterval(fetchSummary, 30000);
+    fetchData();
+    const interval = setInterval(fetchData, 15000);
     return () => clearInterval(interval);
   }, []);
 
-  // 數據過濾與排序邏輯
+  // 數據計算
   const filteredData = useMemo(() => {
     const symbolsMap: Record<string, Record<string, number>> = {};
     Object.values(rates).forEach(r => {
@@ -83,21 +123,15 @@ function App() {
             .filter(([ex]) => selectedExchanges.includes(ex))
             .map(([_, r]) => r * (24/8) * 365 * 100);
         const spread = activeRates.length > 1 ? (Math.max(...activeRates) - Math.min(...activeRates)) : 0;
-        return { 
-            symbol: sym, 
-            rates: symbolsMap[sym], 
-            spread, 
-            base: sym.replace(/USDT|USDC|BUSD|DAI$/i, ''), 
-            quote: sym.includes('USDC') ? 'USDC' : 'USDT' 
-        };
+        return { symbol: sym, rates: symbolsMap[sym], spread, base: sym.replace(/USDT|USDC/i, ''), quote: sym.includes('USDC') ? 'USDC' : 'USDT' };
     });
 
     if (search) result = result.filter(r => r.symbol.toLowerCase().includes(search.toLowerCase()));
-    
+
     result.sort((a, b) => {
         let v1: any, v2: any;
         if (sortConfig.key === 'symbol') { v1 = a.symbol; v2 = b.symbol; }
-        else if (sortConfig.key === 'spread') { v1 = a.spread; v2 = b.spread; }
+        else if (sortConfig.key === 'spread') { v1 = a.spread > 0 ? a.spread : undefined; v2 = b.spread > 0 ? b.spread : undefined; }
         else { v1 = a.rates[sortConfig.key]; v2 = b.rates[sortConfig.key]; }
         if (v1 === undefined && v2 === undefined) return 0;
         if (v1 === undefined) return 1; if (v2 === undefined) return -1;
@@ -107,113 +141,95 @@ function App() {
     return result;
   }, [rates, search, selectedExchanges, sortConfig]);
 
-  // 修復：正確定義分頁變數
-  const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
   const currentSymbols = filteredData.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
 
   useEffect(() => {
     if (!selectedPair) return;
     fetch(`/api/rates/history/${selectedPair.exchange}/${selectedPair.symbol}`)
       .then(res => res.json())
-      .then(data => setHistory(Array.isArray(data) ? data.reverse() : []));
+      .then(data => setHistory(Array.isArray(data) ? data : []));
   }, [selectedPair]);
 
   const getHeatColor = (rate: number | undefined) => {
     if (rate === undefined) return { backgroundColor: 'rgba(30, 30, 30, 0.2)', color: '#444' };
     const val = rate * 100;
     const opacity = Math.min(Math.abs(val) / 0.05, 1);
-    return {
-        backgroundColor: val > 0 ? `rgba(0, 200, 120, ${0.1 + opacity * 0.8})` : `rgba(240, 60, 80, ${0.1 + opacity * 0.8})`,
-        color: Math.abs(val) > 0.02 ? '#fff' : (val > 0 ? '#00ffaa' : '#ff7788')
-    };
+    const color = val > 0 ? `rgba(0, 200, 120, ${0.1 + opacity * 0.8})` : `rgba(240, 60, 80, ${0.1 + opacity * 0.8})`;
+    return { backgroundColor: color, color: Math.abs(val) > 0.02 ? '#fff' : (val > 0 ? '#00ffaa' : '#ff7788') };
   };
 
   const handleSort = (key: string) => {
-    setSortConfig(prev => ({
-        key,
-        direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
-    }));
+    setSortConfig(prev => ({ key, direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc' }));
     setPage(1);
   };
 
   return (
-    <div className="min-h-screen bg-[#000] text-gray-400 font-sans selection:bg-blue-600/30">
-      <nav className="bg-[#080808] border-b border-gray-900 sticky top-0 z-50 px-6 py-3 flex flex-wrap justify-between items-center gap-4">
+    <div className="min-h-screen bg-[#000] text-gray-400 font-sans">
+      <nav className="bg-[#080808] border-b border-gray-900 sticky top-0 z-50 px-6 py-3 flex flex-wrap justify-between items-center gap-4 shadow-2xl">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <Zap size={22} className="text-blue-500 fill-blue-500" />
-            <h1 className="text-xl font-black text-white italic tracking-tighter uppercase">QuantMatrix v10</h1>
+            <h1 className="text-xl font-black text-white italic tracking-tighter uppercase">QuantMatrix v11.8</h1>
           </div>
           <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800">
-             <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
-             <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
+             <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
+             <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
           </div>
         </div>
-        <div className="flex items-center gap-4">
-           <input type="text" placeholder="SEARCH ASSET..." className="bg-[#111] border border-gray-800 rounded-full px-6 py-1.5 text-xs focus:outline-none focus:border-blue-900 w-48 font-bold uppercase" value={search} onChange={(e) => setSearch(e.target.value)} />
-           <div className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${connected ? 'text-green-500 bg-green-500/5' : 'text-red-500 bg-red-500/5'}`}>
-              {connected ? 'Markets Live' : 'Disconnected'}
-           </div>
+        <div className="flex items-center gap-6">
+            <div className="flex flex-col items-end">
+                <div className="text-[10px] font-black uppercase tracking-tighter"><span className="text-gray-600">Last Sync:</span> <span className="text-blue-500">{formatLocalTime(health?.last_update)}</span></div>
+                <div className="flex items-center gap-2 mt-0.5"><div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} /><span className="text-[9px] font-bold text-gray-700 uppercase">Engine: {connected ? 'Online' : 'Offline'}</span></div>
+            </div>
+            <input type="text" placeholder="SEARCH ASSET..." className="bg-[#111] border border-gray-800 rounded-full px-6 py-1.5 text-xs focus:outline-none focus:border-blue-900 w-48 font-bold uppercase" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
       </nav>
 
       <main className="max-w-[1800px] mx-auto p-6">
         {/* 統計看板 */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg overflow-hidden relative group">
-                <div className="flex justify-between items-start mb-4">
-                    <div>
-                        <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Market Sentiment</div>
-                        <div className={`text-2xl font-black italic tracking-tighter ${summary?.market_sentiment === 'Bullish' ? 'text-green-500' : 'text-red-500'}`}>
-                            {summary?.market_sentiment || 'NEUTRAL'}
-                        </div>
-                    </div>
-                    <div className="p-2 bg-gray-900 rounded-lg border border-gray-800"><Globe size={18} className="text-blue-500"/></div>
-                </div>
-                <div className="flex items-center gap-2">
+            <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg relative group">
+                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Market Sentiment</div>
+                <div className={`text-2xl font-black italic tracking-tighter ${summary?.market_sentiment === 'Bullish' ? 'text-green-500' : 'text-red-500'}`}>{summary?.market_sentiment || 'NEUTRAL'}</div>
+                <div className="flex items-center gap-2 mt-3">
                     <div className="flex-1 h-1.5 bg-gray-900 rounded-full overflow-hidden flex">
                         <div className="h-full bg-green-500" style={{ width: `${50 + (summary?.avg_funding_rate || 0) * 1000}%` }}></div>
                         <div className="h-full bg-red-500" style={{ width: `${50 - (summary?.avg_funding_rate || 0) * 1000}%` }}></div>
                     </div>
                 </div>
             </div>
-
             <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg">
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingUp size={12} className="text-green-500"/> Top Payers</div>
-                <div className="space-y-2">
-                    {summary?.top_positive?.map((r, i) => (
-                        <div key={i} className="flex justify-between items-center">
-                            <span className="text-xs font-bold text-gray-200 font-mono">{r.symbol}</span>
-                            <span className="text-xs font-black text-green-400">{(r.rate * 100).toFixed(4)}%</span>
-                        </div>
-                    ))}
-                </div>
+                <div className="space-y-1.5">{summary?.top_positive?.map((r, i) => (
+                    <div key={i} className="flex justify-between items-center text-[11px]">
+                        <span className="font-bold text-gray-300 font-mono">
+                            {r.symbol} <span className="text-[8px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded ml-1 uppercase">{r.exchange}</span>
+                        </span>
+                        <span className="font-black text-green-400">{(r.rate * 100).toFixed(4)}%</span>
+                    </div>
+                ))}</div>
             </div>
-
             <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg">
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingDown size={12} className="text-red-500"/> Top Receivers</div>
-                <div className="space-y-2">
-                    {summary?.top_negative?.map((r, i) => (
-                        <div key={i} className="flex justify-between items-center">
-                            <span className="text-xs font-bold text-gray-200 font-mono">{r.symbol}</span>
-                            <span className="text-xs font-black text-red-400">{(r.rate * 100).toFixed(4)}%</span>
-                        </div>
-                    ))}
-                </div>
+                <div className="space-y-1.5">{summary?.top_negative?.map((r, i) => (
+                    <div key={i} className="flex justify-between items-center text-[11px]">
+                        <span className="font-bold text-gray-300 font-mono">
+                            {r.symbol} <span className="text-[8px] bg-red-900/30 text-red-400 px-1.5 py-0.5 rounded ml-1 uppercase">{r.exchange}</span>
+                        </span>
+                        <span className="font-black text-red-400">{(r.rate * 100).toFixed(4)}%</span>
+                    </div>
+                ))}</div>
             </div>
-
-            <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg text-center">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-2">Stablecoin Gap</div>
-                <div className="text-2xl font-black text-white">
-                    {Math.abs((summary?.stablecoin_stats.usdt_avg || 0) - (summary?.stablecoin_stats.usdc_avg || 0)).toFixed(5)}%
-                </div>
-                <div className="text-[9px] font-bold text-gray-700 uppercase mt-1">USDT vs USDC Avg</div>
+            <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg flex flex-col justify-center">
+                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1 flex items-center gap-2"><ShieldCheck size={14} className="text-blue-500"/> Assets Loaded</div>
+                <div className="text-3xl font-black text-white">{filteredData.length}</div>
+                <div className="text-[9px] font-bold text-gray-700 uppercase tracking-tighter">Syncing {Object.keys(rates).length} Keys</div>
             </div>
         </div>
 
-        {/* 交易所開關 */}
+        {/* 交易所選擇 */}
         <div className="flex flex-wrap items-center gap-3 mb-6 bg-[#080808] p-3 rounded-xl border border-gray-900">
-            <span className="text-[10px] font-black text-gray-700 uppercase tracking-widest px-2">Monitor:</span>
             {ALL_EXCHANGES.map(ex => (
                 <button key={ex} onClick={() => { setSelectedExchanges(prev => prev.includes(ex) ? prev.filter(e => e !== ex) : [...prev, ex]); setPage(1); }} className={`text-[10px] font-black uppercase flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${selectedExchanges.includes(ex) ? 'bg-blue-600/10 text-blue-400 border border-blue-900/30' : 'text-gray-700 border border-transparent'}`}>
                     {selectedExchanges.includes(ex) ? <CheckSquare size={12}/> : <Square size={12}/>} {ex}
@@ -257,21 +273,22 @@ function App() {
                                 </td>
                             </tr>
                         ))}
+                        {currentSymbols.length === 0 && (
+                            <tr><td colSpan={selectedExchanges.length + 2} className="py-20 text-center text-gray-700 italic">Connecting to high-speed data stream...</td></tr>
+                        )}
                     </tbody>
                 </table>
             </div>
-            {/* 分頁控制 */}
             <div className="bg-[#0f0f0f] border-t border-gray-900 px-8 py-4 flex justify-between items-center text-[10px] font-black text-gray-700 uppercase tracking-widest">
-                <div className="flex items-center gap-6">
+                <div className="flex gap-4 items-center">
                     <span>{filteredData.length} Symbols</span>
-                    <div className="flex items-center gap-2">
-                        <span>Rows:</span>
+                    <div className="flex gap-2">
                         {[10, 25, 50, 100].map(s => (
-                            <button key={s} onClick={() => {setPageSize(s); setPage(1);}} className={`px-2 py-1 rounded ${pageSize === s ? 'bg-gray-800 text-white' : 'hover:text-gray-400'}`}>{s}</button>
+                            <button key={s} onClick={() => {setPageSize(s); setPage(1);}} className={pageSize === s ? 'text-white' : 'hover:text-gray-600'}>{s}</button>
                         ))}
                     </div>
                 </div>
-                <div className="flex items-center gap-4">
+                <div className="flex gap-4 items-center">
                     <button onClick={() => setPage(p => Math.max(1, p-1))}><ChevronLeft size={16}/></button>
                     <span>Page {page} / {totalPages}</span>
                     <button onClick={() => setPage(p => Math.min(totalPages, p+1))}><ChevronRight size={16}/></button>
@@ -280,10 +297,7 @@ function App() {
           </div>
         ) : (
           <div className="bg-[#0a0a0a] rounded-2xl border border-gray-900 p-8 shadow-3xl overflow-hidden overflow-x-auto">
-             <div className="inline-grid gap-1" style={{ 
-                gridTemplateRows: `repeat(${selectedExchanges.length}, 44px)`, 
-                gridTemplateColumns: `110px repeat(${currentSymbols.length}, 56px)`
-             }}>
+             <div className="inline-grid gap-1" style={{ gridTemplateRows: `repeat(${selectedExchanges.length}, 44px)`, gridTemplateColumns: `110px repeat(${currentSymbols.length}, 56px)` }}>
                 <div className="sticky left-0 bg-[#0a0a0a] z-40"></div>
                 {currentSymbols.map(s => <div key={s.symbol} className="text-[9px] font-black text-gray-600 origin-bottom-left rotate-[-45deg] translate-y-6 truncate w-20">{s.symbol}</div>)}
                 {selectedExchanges.map(ex => (
@@ -298,7 +312,7 @@ function App() {
           </div>
         )}
         
-        {/* 詳細圖表 */}
+        {/* 圖表終端機 */}
         {selectedPair && (
           <div className="mt-12 animate-in slide-in-from-bottom-12 duration-700">
              <div className="bg-[#080808] rounded-[40px] border border-gray-800 p-12 shadow-2xl relative overflow-hidden">
@@ -306,16 +320,19 @@ function App() {
                 <button onClick={() => setSelectedPair(null)} className="absolute right-12 top-12 text-gray-700 hover:text-white bg-[#111] p-4 rounded-full border border-gray-800 transition-all">✕</button>
                 <div className="flex items-center gap-6 mb-12">
                     <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center shadow-2xl"><BarChart3 size={32} className="text-white" /></div>
-                    <h2 className="text-4xl font-black text-white italic tracking-tighter uppercase">{selectedPair.symbol} <span className="text-blue-600 text-lg">{selectedPair.exchange}</span></h2>
+                    <div>
+                        <h2 className="text-4xl font-black text-white italic tracking-tighter uppercase leading-none mb-3">{selectedPair.symbol}</h2>
+                        <span className="text-[10px] font-black text-blue-500 uppercase tracking-[0.4em] border border-blue-900/50 px-3 py-1 rounded-full">{selectedPair.exchange} Deep Terminal</span>
+                    </div>
                 </div>
-                <div className="h-[450px] w-full bg-[#040404] rounded-3xl p-8 border border-gray-900">
+                <div className="h-[500px] w-full bg-[#040404] rounded-3xl p-8 border border-gray-900">
                     <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={history}>
+                        <AreaChart data={history} margin={{ top: 20, right: 0, left: 0, bottom: 0 }}>
                             <defs><linearGradient id="colorArea" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#2563eb" stopOpacity={0.3}/><stop offset="95%" stopColor="#2563eb" stopOpacity={0}/></linearGradient></defs>
                             <CartesianGrid strokeDasharray="3 3" stroke="#111" vertical={false} />
                             <XAxis dataKey="timestamp" hide />
                             <YAxis stroke="#222" fontSize={10} tickFormatter={v => `${(v*100).toFixed(4)}%`} orientation="right" domain={['auto', 'auto']} />
-                            <Tooltip contentStyle={{ backgroundColor: '#000', border: '1px solid #111', borderRadius: '12px' }} labelFormatter={l => new Date(l).toLocaleString()} formatter={(val: any) => [`${(Number(val) * 100).toFixed(5)}%`, 'Rate']}/>
+                            <Tooltip contentStyle={{ backgroundColor: '#000', border: '1px solid #111', borderRadius: '12px' }} labelFormatter={l => formatLocalTime(l)} formatter={(val: any) => [`${(Number(val) * 100).toFixed(5)}%`, 'Rate']}/>
                             <Area type="stepAfter" dataKey="rate" stroke="#3b82f6" strokeWidth={5} fill="url(#colorArea)" />
                         </AreaChart>
                     </ResponsiveContainer>

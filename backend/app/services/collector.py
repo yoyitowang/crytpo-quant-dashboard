@@ -11,6 +11,102 @@ from typing import List, Dict, Any, Callable
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class IntervalManager:
+    def __init__(self):
+        self.intervals: Dict[str, Dict[str, int]] = {}
+        self.lock = asyncio.Lock()
+
+    async def refresh(self):
+        async with self.lock:
+            async with aiohttp.ClientSession() as session:
+                # Binance
+                try:
+                    async with session.get("https://fapi.binance.com/fapi/v1/fundingInfo", timeout=10) as resp:
+                        d = await resp.json()
+                        self.intervals['binance'] = {i['symbol']: int(i.get('fundingIntervalHours', 8)) for i in d}
+                except Exception as e:
+                    logger.error(f"Binance Interval Refresh Failed: {e}")
+
+                # Bybit
+                try:
+                    async with session.get("https://api.bybit.com/v5/market/instruments-info?category=linear", timeout=10) as resp:
+                        d = await resp.json()
+                        self.intervals['bybit'] = {i['symbol']: int(i.get('fundingInterval', 480)) // 60 for i in d['result']['list']}
+                except Exception as e:
+                    logger.error(f"Bybit Interval Refresh Failed: {e}")
+
+                # Bitget
+                try:
+                    async with session.get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES", timeout=10) as resp:
+                        d = await resp.json()
+                        if d.get('code') == '00000':
+                            self.intervals['bitget'] = {i['symbol']: int(i.get('fundInterval', 8)) for i in d['data']}
+                except Exception as e:
+                    logger.error(f"Bitget Interval Refresh Failed: {e}")
+
+                # Gate
+                try:
+                    async with session.get("https://api.gateio.ws/api/v4/futures/usdt/contracts", timeout=10) as resp:
+                        d = await resp.json()
+                        self.intervals['gate'] = {i['name']: int(i.get('funding_interval', 28800)) // 3600 for i in d}
+                except Exception as e:
+                    logger.error(f"Gate Interval Refresh Failed: {e}")
+
+                # CoinW
+                try:
+                    async with session.get("https://api.coinw.com/v1/perpum/instruments", timeout=10) as resp:
+                        d = await resp.json()
+                        if d.get('code') == 0:
+                            # Normalize CoinW symbols to match collector (BTCUSDT)
+                            self.intervals['coinw'] = {i['base'].upper() + "USDT": int(i.get('settledPeriod', 8)) for i in d['data']}
+                except Exception as e:
+                    logger.error(f"CoinW Interval Refresh Failed: {e}")
+
+                # MEXC
+                try:
+                    async with session.get("https://contract.mexc.com/api/v1/contract/funding_rate", timeout=10) as resp:
+                        d = await resp.json()
+                        if d.get('success'):
+                            self.intervals['mexc'] = {i['symbol']: int(i.get('collectCycle', 8)) for i in d['data']}
+                except Exception as e:
+                    logger.error(f"MEXC Interval Refresh Failed: {e}")
+
+                # KuCoin
+                try:
+                    async with session.get("https://api-futures.kucoin.com/api/v1/contracts/active", timeout=10) as resp:
+                        d = await resp.json()
+                        if d.get('code') == '200000':
+                            self.intervals['kucoin'] = {i['symbol']: int(i.get('fundingRateGranularity') or 28800000) // 3600000 for i in d['data']}
+                except Exception as e:
+                    logger.error(f"KuCoin Interval Refresh Failed: {e}")
+
+                # BingX
+                try:
+                    async with session.get("https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex", timeout=10) as resp:
+                        d = await resp.json()
+                        if d.get('code') == 0:
+                            self.intervals['bingx'] = {i['symbol']: int(i.get('fundingIntervalHours', 8)) for i in d['data']}
+                except Exception as e:
+                    logger.error(f"BingX Interval Refresh Failed: {e}")
+
+        logger.info(f"Interval Map Refreshed. (Binance: {len(self.intervals.get('binance', {}))}, Bybit: {len(self.intervals.get('bybit', {}))}, Bitget: {len(self.intervals.get('bitget', {}))}, MEXC: {len(self.intervals.get('mexc', {}))})")
+
+    def get(self, exchange: str, symbol: str) -> int:
+        exch = exchange.lower().strip()
+        # 符號正規化以適應快取查找 (例如 BTC-USDT -> BTCUSDT)
+        clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
+        
+        ex_map = self.intervals.get(exch, {})
+        
+        # 特殊處理 Binance 的幣種符號 (Binance API 往往不帶橫線)
+        if exch == 'binance':
+            return ex_map.get(clean_sym, 8)
+            
+        # 優先查找原始符號，然後是正規化後的匹配
+        return ex_map.get(symbol, ex_map.get(clean_sym, 8))
+
+interval_manager = IntervalManager()
+
 class DataCollector:
     def __init__(self):
         self.exchanges = {
@@ -42,6 +138,11 @@ class DataCollector:
                 if settle_time and isinstance(settle_time, datetime):
                     if settle_time < now:
                         continue
+                
+                # Dynamic Interval Injection
+                exch = item['exchange']
+                sym = item['symbol']
+                item['interval'] = item.get('interval') or interval_manager.get(exch, sym)
                 fresh_items.append(item)
             
             if not fresh_items:
@@ -79,11 +180,19 @@ class DataCollector:
             except Exception: pass
 
     async def start(self):
+        await interval_manager.refresh()
+        asyncio.create_task(self._interval_refresher())
+        
         for _ in range(15): asyncio.create_task(self._worker())
         for name, handler in self.exchanges.items():
             asyncio.create_task(self._safe_handler(name, handler))
-        logger.info("Universal Data Processor v18.6 Online.")
+        logger.info("Universal Data Processor v19.2 Online.")
         while True: await asyncio.sleep(3600)
+
+    async def _interval_refresher(self):
+        while True:
+            await asyncio.sleep(86400) # Daily refresh
+            await interval_manager.refresh()
 
     async def _safe_handler(self, name: str, handler: Callable):
         while True:
@@ -97,46 +206,79 @@ class DataCollector:
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
+                    # 獲取交易中合約清單以過濾 PENDING_TRADING 或 SETTLING (如 RLS, OXT)
+                    async with session.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10) as ex_resp:
+                        ex_info = await ex_resp.json()
+                        trading_syms = {s['symbol'] for s in ex_info['symbols'] if s['status'] == 'TRADING'}
+
                     async with session.get(url, timeout=10) as resp:
                         data = await resp.json()
                         batch = [{
                             "exchange": "binance", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
                             "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000), "timestamp": datetime.utcnow()
-                        } for item in data if 'symbol' in item]
+                        } for item in data if item.get('symbol') in trading_syms]
                         await self._notify_callbacks(batch)
                     await asyncio.sleep(60)
                 except: await asyncio.sleep(10)
 
     async def _coinw_handler(self):
-        # --- 核心：利用 CCXT 精確探測全市場期貨幣種 ---
+        # --- 核心：探測與輪詢輔助 ---
         wss_url = "wss://ws.futurescw.com/perpum"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        rest_base = "https://api.coinw.com"
         
         async def get_all_futures():
             try:
-                # 使用 CCXT 4.5.51+ 正確加載 CoinW 合約清單
-                import ccxt.async_support as ccxt_async
-                exchange = ccxt_async.coinw()
-                markets = await exchange.load_markets()
-                # 篩選 Swap 且結算為 USDT 的幣種
-                futures = [m['base'] for m in markets.values() if m.get('swap') and m.get('settle') == 'USDT']
-                await exchange.close()
-                return list(set(futures))
+                # 優先檢查 IntervalManager 是否已經有成功的 CoinW 清單 (避免重複請求觸發 429)
+                cached_coinw = interval_manager.intervals.get('coinw')
+                if cached_coinw:
+                    return [s.replace('USDT', '') for s in cached_coinw.keys()]
+
+                # 嘗試使用 REST API 探測
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{rest_base}/v1/perpum/instruments", timeout=10) as resp:
+                        res = await resp.json()
+                        if res.get('code') == 0 and 'data' in res:
+                            return list(set([item['base'].upper() for item in res['data'] if item.get('status') == 'online']))
+                
+                return ["BTC", "ETH", "SOL", "CHIP", "LUNC", "DOGE", "PEPE"]
             except Exception as e:
-                logger.error(f"CoinW CCXT Discovery failed: {e}")
-                # 備援機制：至少包含主流與用戶要求
+                logger.error(f"CoinW Discovery failed: {e}")
                 return ["BTC", "ETH", "SOL", "CHIP", "LUNC", "DOGE", "PEPE"]
 
-        additional_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        
-        async with websockets.connect(wss_url, additional_headers=additional_headers, ping_interval=15) as ws:
-            pairs = await get_all_futures()
-            # 確保 CHIP 在清單中
-            if "CHIP" not in [p.upper() for p in pairs]:
-                pairs.append("CHIP")
-                
-            logger.info(f"CoinW Discovery Success: Subscribing to {len(pairs)} Pure Futures.")
+        async def poll_task(pairs):
+            """補足 WS 可能漏掉的數據，每 10 分鐘全面輪詢一次"""
+            async with aiohttp.ClientSession() as session:
+                while True:
+                    try:
+                        for p in pairs:
+                            # 針對每個幣種請求最後結算率
+                            url = f"{rest_base}/v1/perpum/fundingRate?instrument={p.lower()}"
+                            async with session.get(url, timeout=5) as resp:
+                                res = await resp.json()
+                                if res.get('code') == 0 and 'data' in res:
+                                    item = res['data']
+                                    await self._notify_callbacks({
+                                        "exchange": "coinw",
+                                        "symbol": f"{p.upper()}USDT",
+                                        "rate": float(item['value']),
+                                        "settlement_time": datetime.fromtimestamp(item['ts'] / 1000),
+                                        "timestamp": datetime.utcnow()
+                                    })
+                            await asyncio.sleep(0.15) # 遵守 8 req/s 限制
+                        await asyncio.sleep(600)
+                    except Exception as e:
+                        logger.error(f"CoinW Polling Error: {e}")
+                        await asyncio.sleep(30)
 
+        pairs = await get_all_futures()
+        if "CHIP" not in pairs: pairs.append("CHIP")
+        logger.info(f"CoinW Discovery Success: {len(pairs)} pairs. Starting WS & Polling.")
+        
+        # 啟動補位輪詢
+        asyncio.create_task(poll_task(pairs))
+
+        additional_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with websockets.connect(wss_url, additional_headers=additional_headers, ping_interval=15) as ws:
             # 分批訂閱
             for i in range(0, len(pairs), 40):
                 batch = pairs[i:i+40]
@@ -171,7 +313,8 @@ class DataCollector:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://www.okx.com/api/v5/public/instruments?instType=SWAP") as resp:
                 d = await resp.json()
-                all_ids = [i['instId'] for i in d['data'] if i['settleCcy'] == 'USDT']
+                # 僅訂閱 'live' 狀態的合約
+                all_ids = [i['instId'] for i in d['data'] if i['settleCcy'] == 'USDT' and i.get('state') == 'live']
         async with websockets.connect(url, ping_interval=20) as ws:
             for i in range(0, len(all_ids), 100):
                 batch = all_ids[i:i+100]
@@ -181,21 +324,45 @@ class DataCollector:
                 data = json.loads(msg)
                 if "data" in data:
                     for item in data["data"]:
+                        interval = 8
+                        if 'nextFundingTime' in item and 'fundingTime' in item:
+                            try:
+                                interval = max(1, round((int(item['nextFundingTime']) - int(item['fundingTime'])) / 3600000))
+                            except: pass
                         await self._notify_callbacks({
                             "exchange": "okx", "symbol": item['instId'],
-                            "rate": float(item['fundingRate']), "settlement_time": datetime.fromtimestamp(int(item['fundingTime']) / 1000),
+                            "rate": float(item['fundingRate']),
+                            "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000),
+                            "interval": interval,
                             "timestamp": datetime.utcnow()
                         })
 
     async def _bybit_handler(self):
         url = "wss://stream.bybit.com/v5/public/linear"
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.bybit.com/v5/market/instruments-info?category=linear") as resp:
-                d = await resp.json()
-                all_symbols = [i['symbol'] for i in d['result']['list'] if i['symbol'].endswith('USDT')]
+            try:
+                async with session.get("https://api.bybit.com/v5/market/instruments-info?category=linear") as resp:
+                    d = await resp.json()
+                    # 僅訂閱 'Trading' 狀態
+                    all_symbols = [i['symbol'] for i in d['result']['list'] if i['symbol'].endswith('USDT') and i.get('status') == 'Trading']
+                
+                # 初始 REST 抓取：確保秒開有數據
+                async with session.get("https://api.bybit.com/v5/market/tickers?category=linear") as resp:
+                    d = await resp.json()
+                    batch = []
+                    for item in d.get('result', {}).get('list', []):
+                        if item['symbol'] in all_symbols and item.get('fundingRate'):
+                            batch.append({
+                                "exchange": "bybit", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
+                                "timestamp": datetime.utcnow()
+                            })
+                    if batch: await self._notify_callbacks(batch)
+            except Exception as e: logger.error(f"Bybit Initial Fetch Failed: {e}")
         async with websockets.connect(url, ping_interval=20) as ws:
-            sub = all_symbols[:150]
-            await ws.send(json.dumps({"op": "subscribe", "args": [f"tickers.{s}" for s in sub]}))
+            for i in range(0, len(all_symbols), 100):
+                batch = all_symbols[i:i+100]
+                await ws.send(json.dumps({"op": "subscribe", "args": [f"tickers.{s}" for s in batch]}))
             while True:
                 msg = await ws.recv()
                 data = json.loads(msg)
@@ -217,10 +384,14 @@ class DataCollector:
                         res = await resp.json()
                         if res.get('data'):
                             for item in res['data']:
-                                if 'USDT' in item.get('symbol', ''):
+                                # 僅處理 'Open' 狀態且包含 USDT
+                                if 'USDT' in item.get('symbol', '') and item.get('status') == 'Open':
                                     await self._notify_callbacks({
                                         "exchange": "kucoin", "symbol": item['symbol'],
-                                        "rate": float(item.get('fundingFeeRate') or 0), "settlement_time": None, "timestamp": datetime.utcnow()
+                                        "rate": float(item.get('fundingFeeRate') or 0),
+                                        "interval": int(item.get('fundingRateGranularity') or 28800000) // 3600000,
+                                        "settlement_time": datetime.fromtimestamp(item['nextFundingRateDateTime'] / 1000) if item.get('nextFundingRateDateTime') else None, 
+                                        "timestamp": datetime.utcnow()
                                     })
                     await asyncio.sleep(60)
                 except: await asyncio.sleep(10)
@@ -230,15 +401,22 @@ class DataCollector:
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
+                    # 獲取 MEXC 合約詳情以過濾狀態 (state 0 為正常交易)
+                    async with session.get("https://contract.mexc.com/api/v1/contract/detail", timeout=10) as det_resp:
+                        det_data = await det_resp.json()
+                        trading_syms = {i['symbol'] for i in det_data['data'] if i.get('state') == 0}
+
                     async with session.get(url, timeout=10) as resp:
                         d = await resp.json()
                         if d.get('data'):
                             for item in d['data']:
-                                await self._notify_callbacks({
-                                    "exchange": "mexc", "symbol": item['symbol'], "rate": float(item['fundingRate']),
-                                    "settlement_time": datetime.fromtimestamp(item['settleTime'] / 1000) if item.get('settleTime') else None,
-                                    "timestamp": datetime.utcnow()
-                                })
+                                if item['symbol'] in trading_syms:
+                                    await self._notify_callbacks({
+                                        "exchange": "mexc", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                                        "settlement_time": datetime.fromtimestamp(item['nextSettleTime'] / 1000) if item.get('nextSettleTime') else None,
+                                        "interval": int(item.get('collectCycle', 8)),
+                                        "timestamp": datetime.utcnow()
+                                    })
                     await asyncio.sleep(60)
                 except: await asyncio.sleep(15)
 
@@ -246,14 +424,20 @@ class DataCollector:
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
+                    # 獲取 BingX 合約清單以過濾狀態 (status 1 為正常交易)
+                    async with session.get("https://open-api.bingx.com/openApi/swap/v2/quote/contracts") as c_resp:
+                        c_data = await c_resp.json()
+                        trading_syms = {i['symbol'] for i in c_data['data'] if i.get('status') == 1}
+
                     async with session.get("https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex") as resp:
                         d = await resp.json()
                         if d.get('data'):
                             for item in d['data']:
-                                if item['symbol'].endswith('USDT'):
+                                if item['symbol'] in trading_syms and item['symbol'].endswith('USDT'):
                                     await self._notify_callbacks({
                                         "exchange": "bingx", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
                                         "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000) if item.get('nextFundingTime') else None,
+                                        "interval": int(item.get('fundingIntervalHours', 8)),
                                         "timestamp": datetime.utcnow()
                                     })
                     await asyncio.sleep(60)
@@ -261,9 +445,32 @@ class DataCollector:
 
     async def _bitget_handler(self):
         url = "wss://ws.bitget.com/v2/ws/public"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get("https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES") as resp:
+                    d = await resp.json()
+                    # 僅訂閱 'normal' 狀態
+                    all_symbols = [i['symbol'] for i in d['data'] if i['symbolStatus'] == 'normal' and i['quoteCoin'] == 'USDT']
+                
+                # 初始 REST 抓取
+                async with session.get("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES") as resp:
+                    d = await resp.json()
+                    batch = []
+                    for item in d.get('data', []):
+                        if item['symbol'] in all_symbols and item.get('fundingRate'):
+                            batch.append({
+                                "exchange": "bitget", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
+                                "timestamp": datetime.utcnow()
+                            })
+                    if batch: await self._notify_callbacks(batch)
+            except Exception as e: logger.error(f"Bitget Initial Fetch Failed: {e}")
+        
         async with websockets.connect(url, ping_interval=15) as ws:
-            syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]
-            await ws.send(json.dumps({"op": "subscribe", "args": [{"instType": "USDT-FUTURES", "channel": "ticker", "instId": s} for s in syms]}))
+            for i in range(0, len(all_symbols), 100):
+                batch = all_symbols[i:i+100]
+                await ws.send(json.dumps({"op": "subscribe", "args": [{"instType": "USDT-FUTURES", "channel": "ticker", "instId": s} for s in batch]}))
+            
             while True:
                 msg = await ws.recv()
                 if msg == "pong": continue
@@ -279,8 +486,36 @@ class DataCollector:
 
     async def _gate_handler(self):
         url = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get("https://api.gateio.ws/api/v4/futures/usdt/contracts") as resp:
+                    d = await resp.json()
+                    # 僅訂閱 'trading' 狀態
+                    all_symbols = [i['name'] for i in d if i.get('status') == 'trading']
+                
+                # 初始 REST 抓取
+                async with session.get("https://api.gateio.ws/api/v4/futures/usdt/tickers") as resp:
+                    d = await resp.json()
+                    batch = []
+                    for item in d:
+                        if item['contract'] in all_symbols and item.get('funding_rate'):
+                            batch.append({
+                                "exchange": "gate", "symbol": item['contract'], "rate": float(item['funding_rate']),
+                                "settlement_time": None, "timestamp": datetime.utcnow()
+                            })
+                    if batch: await self._notify_callbacks(batch)
+            except Exception as e: logger.error(f"Gate Initial Fetch Failed: {e}")
+        
         async with websockets.connect(url, ping_interval=20) as ws:
-            await ws.send(json.dumps({"time": int(datetime.utcnow().timestamp()), "channel": "futures.tickers", "event": "subscribe", "payload": ["BTC_USDT", "ETH_USDT", "SOL_USDT", "DOGE_USDT"]}))
+            for i in range(0, len(all_symbols), 100):
+                batch = all_symbols[i:i+100]
+                await ws.send(json.dumps({
+                    "time": int(datetime.utcnow().timestamp()), 
+                    "channel": "futures.tickers", 
+                    "event": "subscribe", 
+                    "payload": batch
+                }))
+            
             while True:
                 msg = await ws.recv()
                 data = json.loads(msg)

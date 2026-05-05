@@ -17,37 +17,10 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 redis: aioredis.Redis = None
-db_queue = asyncio.Queue()
 local_rate_cache = {} # v11.8: 本地緩存，減少 Redis 壓力
 
-async def db_worker():
-    while True:
-        items = []
-        try:
-            item = await db_queue.get()
-            items.append(item)
-            while len(items) < 100:
-                try:
-                    item = await asyncio.wait_for(db_queue.get(), timeout=1.0)
-                    items.append(item)
-                except asyncio.TimeoutError: break
-        except Exception: continue
-        if items:
-            async with SessionLocal() as session:
-                try:
-                    for data in items:
-                        new_rate = FundingRate(
-                            exchange=data["exchange"], symbol=data["symbol"], rate=data["rate"],
-                            settlement_time=data["settlement_time"], timestamp=data["timestamp"]
-                        )
-                        session.add(new_rate)
-                    await session.commit()
-                except Exception as e: logger.error(f"DB Error: {e}")
-                finally:
-                    for _ in range(len(items)): db_queue.task_done()
-
 async def db_callback(data):
-    """資料庫與 Redis 寫入 Callback (極速批次版)"""
+    """Redis 寫入 Callback (極速批次版) - 已移除 PostgreSQL 寫入以降低負擔"""
     global redis
     if redis is None: return
 
@@ -64,14 +37,7 @@ async def db_callback(data):
             redis_data['settlement_time'] = redis_data['settlement_time'].isoformat() if isinstance(redis_data.get('settlement_time'), datetime) else redis_data.get('settlement_time')
             redis_data['timestamp'] = redis_data['timestamp'].isoformat() if isinstance(redis_data.get('timestamp'), datetime) else redis_data.get('timestamp')
             mset_data[key] = json.dumps(redis_data)
-
-            # 更新本地 Cache 用於過濾 DB 寫入
-            current_rate = item['rate']
-            last_rate = local_rate_cache.get(key)
-            if last_rate is None or abs(last_rate - current_rate) > 1e-9:
-                await db_queue.put(item)
-                local_rate_cache[key] = current_rate
-
+        
         if mset_data:
             await redis.mset(mset_data)
     else:
@@ -85,13 +51,6 @@ async def db_callback(data):
 
         await redis.set(key, json.dumps(redis_data))
 
-        current_rate = data['rate']
-        last_rate = local_rate_cache.get(key)
-        if last_rate is None or abs(last_rate - current_rate) > 1e-9:
-            await db_queue.put(data)
-            local_rate_cache[key] = current_rate
-
-
 async def ws_callback(data):
     await ws_manager.broadcast(data)
 
@@ -99,11 +58,8 @@ async def ws_callback(data):
 async def lifespan(app: FastAPI):
     global redis
     redis = aioredis.from_url(f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}", decode_responses=True)
-    async with engine.begin() as conn:
-        await conn.execute(text("CREATE TABLE IF NOT EXISTS funding_rates (exchange VARCHAR, symbol VARCHAR, rate DOUBLE PRECISION, settlement_time TIMESTAMP, timestamp TIMESTAMP, PRIMARY KEY (exchange, symbol, timestamp)) PARTITION BY RANGE (timestamp);"))
-        await conn.execute(text("CREATE TABLE IF NOT EXISTS funding_rates_default PARTITION OF funding_rates DEFAULT;"))
     
-    asyncio.create_task(db_worker())
+    # 歷史資金費率已全面改為 API 動態抓取，不再初始化本地資料庫表
     collector.register_callback(db_callback)
     collector.register_callback(ws_callback)
     collector_task = asyncio.create_task(collector.start())

@@ -1,0 +1,17 @@
+import aiohttp
+import asyncio
+
+async def main():
+    url = "https://api.coinw.com/v1/perpum/fundingRateHistory?instrument=btc&pageSize=20&pageNum=1"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "lang": "en_US",
+        "Content-Type": "application/json"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            data = await resp.json()
+            print(f"Response: {data}")
+
+if __name__ == "__main__":
+    asyncio.run(main())

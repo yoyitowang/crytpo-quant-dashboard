@@ -17,6 +17,7 @@ class FundingRate(Base):
     timestamp = Column(DateTime, primary_key=True, default=datetime.utcnow)
     
     rate = Column(Float)
+    interval = Column(Integer, default=8)
     settlement_time = Column(DateTime)
 
 # 建立複合索引以加速查詢

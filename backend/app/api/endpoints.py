@@ -1,19 +1,46 @@
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, text
-from backend.app.db.session import get_db
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from backend.app.services.collector import collector
 from backend.app.services.websocket_manager import ws_manager
-from backend.app.models.funding_rate import FundingRate
 from typing import List
 import logging
 import json
 import re
+import asyncio
 from datetime import datetime, timedelta
 import ccxt.async_support as ccxt_async
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+@router.get("/rates/compressed")
+async def get_compressed_rates():
+    """極簡版數據介面，專供前端快速渲染矩陣使用，移除不必要的欄位與冗餘計算。"""
+    try:
+        from backend.app.main import redis
+        if redis is None: return []
+        keys = await redis.keys("latest:*")
+        if not keys: return []
+        
+        # 分批獲取以防止 Redis 阻塞
+        all_data = []
+        for i in range(0, len(keys), 1000):
+            batch_keys = keys[i:i+1000]
+            rates_json = await redis.mget(batch_keys)
+            all_data.extend([json.loads(r) for r in rates_json if r])
+            
+        # 壓縮：只保留 symbol, exchange, rate, interval
+        compressed = []
+        for r in all_data:
+            compressed.append([
+                r['symbol'],
+                r['exchange'],
+                round(r['rate'], 6),
+                r.get('interval', 8)
+            ])
+        return compressed
+    except Exception as e:
+        logger.error(f"Compressed Rates Error: {e}")
+        return []
 
 @router.get("/health")
 async def health_check():
@@ -54,7 +81,14 @@ async def get_market_summary():
         all_rates = [json.loads(r) for r in rates_json if r]
         if not all_rates: return {}
         
+        # Calculate APR for each symbol: rate * (24/interval) * 365
+        for r in all_rates:
+            interval = r.get('interval', 8)
+            r['apr'] = r['rate'] * (24 / interval) * 365
+            
         avg_rate = sum(r['rate'] for r in all_rates) / len(all_rates)
+        avg_apr = sum(r['apr'] for r in all_rates) / len(all_rates)
+        
         sorted_rates = sorted(all_rates, key=lambda x: x['rate'])
         top_neg = sorted_rates[:5]
         top_pos = sorted_rates[-5:][::-1]
@@ -65,82 +99,167 @@ async def get_market_summary():
         avg_usdc = sum(usdc_rates) / len(usdc_rates) if usdc_rates else 0
         
         return {
-            "market_sentiment": "Bullish" if avg_rate > 0 else "Bearish",
+            "market_sentiment": "Bullish" if avg_apr > 0 else "Bearish",
             "avg_funding_rate": avg_rate,
+            "avg_apr": avg_apr,
             "top_positive": top_pos,
             "top_negative": top_neg,
             "stablecoin_stats": { "usdt_avg": avg_usdt, "usdc_avg": avg_usdc },
             "total_symbols": len(all_rates)
         }
     except Exception as e:
+        logger.error(f"Summary Error: {e}")
         return {}
 
+import aiohttp
+
+async def fetch_coinw_history(symbol: str, days: int):
+    """專屬 CoinW 歷史 API 抓取邏輯"""
+    match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+    base = match.group(1).lower() if match else symbol.lower()
+    
+    url = "https://futuresapi.faefrdpenn.com/v1/futuresc/public/selectFundingRateHistory"
+    payload = {"instrument": base, "day": days}
+    headers = {"Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('code') == 0:
+                        return [
+                            {
+                                "timestamp": datetime.strptime(item['createdDate'], "%Y-%m-%d %H:%M").isoformat(),
+                                "rate": float(item['fundingRate'])
+                            } for item in data['data']
+                        ]
+    except Exception as e:
+        logger.error(f"CoinW History API Error: {e}")
+    return []
+
 @router.get("/rates/history_all/{symbol}")
-async def get_aggregated_history(
-    symbol: str, days: int = 7, db: AsyncSession = Depends(get_db)
-):
-    """聚合查詢：獲取該幣種在所有交易所的歷史，用於 Modal 比對。"""
-    start_time = datetime.utcnow() - timedelta(days=days)
+async def get_aggregated_history(symbol: str, days: int = 7):
+    """聚合查詢：並發向所有交易所請求該幣種的歷史，不再依賴本地資料庫。加入 Redis 快取。"""
+    cache_key = f"history_all:{symbol}:{days}"
+    try:
+        from backend.app.main import redis
+        if redis:
+            cached = await redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+    except Exception as e:
+        logger.error(f"Redis Read Error (history_all): {e}")
+
+    active_exchanges = [ex for ex in collector.exchanges.keys()]
     
-    # 使用資料庫查詢所有相關交易所的歷史
-    trunc_func = func.date_trunc('hour', FundingRate.timestamp)
-    query = select(
-        FundingRate.exchange,
-        trunc_func.label('ts'),
-        func.avg(FundingRate.rate).label('rate')
-    ).where(
-        FundingRate.symbol == symbol, 
-        FundingRate.timestamp >= start_time
-    ).group_by(FundingRate.exchange, trunc_func).order_by(trunc_func.asc())
+    tasks = []
+    for ex in active_exchanges:
+        tasks.append(get_historical_rates(ex, symbol, days))
     
-    res = await db.execute(query)
-    rows = res.all()
+    all_res = await asyncio.gather(*tasks)
     
-    # 格式化為前端易用的結構：{ "binance": [...], "okx": [...] }
     result = {}
-    for r in rows:
-        ex = r.exchange
-        if ex not in result: result[ex] = []
-        result[ex].append({"time": int(r.ts.timestamp()), "value": float(r.rate)})
-        
+    for ex, history in zip(active_exchanges, all_res):
+        if history:
+            result[ex] = [{"time": int(datetime.fromisoformat(h['timestamp']).timestamp()), "value": h['rate']} for h in history]
+    
+    try:
+        if redis and result:
+            await redis.setex(cache_key, 180, json.dumps(result)) # 3 分鐘快取
+    except Exception as e:
+        logger.error(f"Redis Write Error (history_all): {e}")
+            
     return result
 
 @router.get("/rates/history/{exchange}/{symbol}")
-async def get_historical_rates(
-    exchange: str, symbol: str, days: int = 7, db: AsyncSession = Depends(get_db)
-):
-    """獲取單一交易所歷史資料：先查 DB，若無資料則向交易所 API 請求。"""
-    start_time = datetime.utcnow() - timedelta(days=days)
-    
-    trunc_func = func.date_trunc('hour', FundingRate.timestamp)
-    query_agg = select(
-        trunc_func.label('ts'),
-        func.avg(FundingRate.rate).label('rate')
-    ).where(
-        FundingRate.exchange == exchange, FundingRate.symbol == symbol, FundingRate.timestamp >= start_time
-    ).group_by(trunc_func).order_by(trunc_func.asc())
-    
-    res_agg = await db.execute(query_agg)
-    db_data = [{"timestamp": r.ts.isoformat(), "rate": float(r.rate)} for r in res_agg.all()]
+async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
+    """獲取單一交易所歷史資料：全面改為即時 API 抓取，加入 Redis 快取保護。"""
+    cache_key = f"history:{exchange.lower()}:{symbol.upper()}:{days}"
+    try:
+        from backend.app.main import redis
+        if redis:
+            cached = await redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+    except Exception as e:
+        logger.error(f"Redis Read Error (history): {e}")
 
-    if len(db_data) < 5:
+    if exchange.lower() == "coinw":
+        res = await fetch_coinw_history(symbol, days)
         try:
-            ex_id = exchange.lower()
-            if hasattr(ccxt_async, ex_id):
-                ex_class = getattr(ccxt_async, ex_id)()
-                if ex_class.has.get('fetchFundingRateHistory'):
-                    match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
-                    ccxt_sym = f"{match.group(1)}/{match.group(2)}" if match else symbol
+            if redis and res:
+                await redis.setex(cache_key, 180, json.dumps(res))
+        except: pass
+        return res
+    
+    try:
+        ex_id = exchange.lower()
+        if ex_id == 'gate': ex_id = 'gateio'
+        
+        if hasattr(ccxt_async, ex_id):
+            ex_class = getattr(ccxt_async, ex_id)
+            # 強制使用 swap/futures 模式以確保獲取正確的歷史數據
+            ex = ex_class({'options': {'defaultType': 'swap'}, 'timeout': 15000})
+            try:
+                # 符號正規化邏輯
+                match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+                base, quote = (match.group(1).upper(), match.group(2).upper()) if match else (symbol.upper(), 'USDT')
+                
+                await ex.load_markets()
+                
+                # 建立優先級符號列表
+                possible_syms = []
+                if ex_id == 'okx':
+                    possible_syms = [f"{base}-{quote}-SWAP", f"{base}/{quote}:{quote}"]
+                elif ex_id == 'binance':
+                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}{quote}"]
+                elif ex_id == 'mexc':
+                    # MEXC CCXT 符號格式較特殊
+                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}_{quote}"]
+                else:
+                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}{quote}"]
+
+                ccxt_sym = None
+                for s in possible_syms:
+                    if s in ex.markets:
+                        ccxt_sym = s
+                        break
+                
+                if not ccxt_sym:
+                    # 暴力搜尋：尋找符合 base/quote 且為 swap 的合約
+                    for s, m in ex.markets.items():
+                        if m.get('swap') and m.get('base') == base and (m.get('quote') == quote or m.get('settle') == quote):
+                            ccxt_sym = s
+                            break
+
+                if ccxt_sym and ex.has.get('fetchFundingRateHistory'):
+                    since = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+                    # 增加 limit 以獲取完整數據
+                    limit = 1000 if days > 7 else 200
+                    hist = await ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=limit)
                     
-                    hist = await ex_class.fetch_funding_rate_history(ccxt_sym, since=int(start_time.timestamp()*1000))
-                    api_data = [{"timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(), "rate": h['fundingRate']} for h in hist]
-                    await ex_class.close()
-                    return sorted(api_data, key=lambda x: x['timestamp'])
-                await ex_class.close()
-        except Exception as e:
-            logger.warning(f"Fallback history fetch failed for {exchange}: {e}")
+                    api_data = []
+                    for h in hist:
+                        if h.get('fundingRate') is not None:
+                            api_data.append({
+                                "timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(), 
+                                "rate": float(h['fundingRate'])
+                            })
+                    
+                    if api_data:
+                        res = sorted(api_data, key=lambda x: x['timestamp'])
+                        try:
+                            if redis: await redis.setex(cache_key, 180, json.dumps(res))
+                        except: pass
+                        return res
+                
+                logger.warning(f"History Fetch: {ex_id} ({symbol}) -> CCXT Sym: {ccxt_sym} | Found: {ccxt_sym in ex.markets if ccxt_sym else False}")
+            finally:
+                await ex.close()
+    except Exception as e:
+        logger.error(f"History API fetch failed for {exchange} ({symbol}): {e}")
             
-    return sorted(db_data, key=lambda x: x['timestamp'])
+    return []
 
 @router.get("/analysis/spreads")
 async def get_funding_spreads():

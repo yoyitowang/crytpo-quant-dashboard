@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff } from 'lucide-react';
+import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff } from 'lucide-react';
 import { createChart, ColorType, IChartApi } from 'lightweight-charts';
 
 interface FundingRate {
   exchange: string;
   symbol: string;
   rate: number;
+  interval?: number;
   settlement_time?: string;
   timestamp: string;
 }
@@ -36,15 +37,35 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
         if (isCompare) {
             // 多交易所比對模式
             Object.keys(data).forEach((ex) => {
+                const isVisible = visibleExchanges.includes(ex);
                 const lineSeries = chart.addLineSeries({
                     color: EXCHANGE_COLORS[ex] || '#888',
                     lineWidth: 2,
                     title: ex.toUpperCase(),
                     // 核心功能：根據狀態決定是否顯示
-                    visible: visibleExchanges.includes(ex),
+                    visible: isVisible,
+                    priceFormat: {
+                        type: 'custom',
+                        formatter: (price: number) => price.toFixed(4) + '%',
+                        minMove: 0.0001
+                    }
                 });
-                const sorted = data[ex].sort((a:any, b:any) => a.time - b.time);
+                const sorted = data[ex].sort((a:any, b:any) => a.time - b.time)
+                    .map((d: any) => ({ ...d, value: d.value * 100 }));
                 lineSeries.setData(sorted);
+                
+                // 新增平均值參考線
+                if (isVisible && sorted.length > 0) {
+                    const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
+                    lineSeries.createPriceLine({
+                        price: avg,
+                        color: EXCHANGE_COLORS[ex] || '#888',
+                        lineWidth: 1,
+                        lineStyle: 3, // Dotted
+                        axisLabelVisible: true,
+                        title: `AVG (${ex.toUpperCase()}): ${avg.toFixed(4)}%`,
+                    });
+                }
             });
         } else {
             // 單交易所模式 (Baseline)
@@ -53,14 +74,31 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
                 topLineColor: '#10b981', topFillColor1: 'rgba(16, 185, 129, 0.4)', topFillColor2: 'rgba(16, 185, 129, 0.05)',
                 bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239, 68, 68, 0.05)', bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
                 lineWidth: 3,
-                priceFormat: { type: 'percent', precision: 5, minMove: 0.00001 }
+                priceFormat: {
+                    type: 'custom',
+                    formatter: (price: number) => price.toFixed(4) + '%',
+                    minMove: 0.0001
+                }
             });
             const sorted = [...data].sort((a: any, b: any) => {
                 const t1 = new Date(a.timestamp).getTime() / 1000;
                 const t2 = new Date(b.timestamp).getTime() / 1000;
                 return t1 - t2;
-            }).map(d => ({ time: new Date(d.timestamp).getTime() / 1000 as any, value: d.rate }));
+            }).map(d => ({ time: new Date(d.timestamp).getTime() / 1000 as any, value: d.rate * 100 }));
             baselineSeries.setData(sorted);
+
+            // 新增平均值參考線
+            if (sorted.length > 0) {
+                const avg = sorted.reduce((acc, cur) => acc + cur.value, 0) / sorted.length;
+                baselineSeries.createPriceLine({
+                    price: avg,
+                    color: '#3B82F6',
+                    lineWidth: 2,
+                    lineStyle: 3, // Dotted
+                    axisLabelVisible: true,
+                    title: `AVERAGE APR: ${avg.toFixed(4)}%`,
+                });
+            }
         }
 
         chart.timeScale().fitContent();
@@ -82,14 +120,65 @@ function App() {
   const [multiHistory, setMultiHistory] = useState<any>(null);
   const [selectedPair, setSelectedPair] = useState<{exchange: string, symbol: string} | null>(null);
   const [compareSymbol, setCompareSymbol] = useState<string | null>(null);
+  const [timeframe, setTimeframe] = useState<number>(7);
   const [visibleExchanges, setVisibleExchanges] = useState<string[]>(ALL_EXCHANGES);
   const [connected, setConnected] = useState(false);
   const [viewMode, setViewMode] = useState<'matrix' | 'heatplot'>('matrix');
   const [search, setSearch] = useState('');
-  const [selectedExchanges, setSelectedExchanges] = useState<string[]>(ALL_EXCHANGES);
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const filterRef = useRef<HTMLDivElement>(null);
+  const [selectedExchanges, setSelectedExchanges] = useState<string[]>(() => {
+    const saved = localStorage.getItem('quantmatrix_exchanges');
+    if (saved) {
+        try { return JSON.parse(saved); } catch (e) { return ALL_EXCHANGES; }
+    }
+    return ALL_EXCHANGES;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('quantmatrix_exchanges', JSON.stringify(selectedExchanges));
+  }, [selectedExchanges]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+        if (filterRef.current && !filterRef.current.contains(event.target as Node)) {
+            setIsFilterOpen(false);
+        }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
   const [sortConfig, setSortConfig] = useState<{key: string, direction: 'asc' | 'desc'}>({key: 'spread', direction: 'desc'});
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [loadingMulti, setLoadingMulti] = useState(false);
+  const [historyCache, setHistoryCache] = useState<Record<string, any>>({});
+
+  const LoadingSpinner = ({ label }: { label?: string }) => (
+    <div className="flex flex-col items-center justify-center gap-4 py-12">
+        <div className="relative w-12 h-12">
+            <div className="absolute inset-0 border-4 border-blue-500/20 rounded-full"></div>
+            <div className="absolute inset-0 border-4 border-transparent border-t-blue-500 rounded-full animate-spin [animation-duration:1.5s]"></div>
+        </div>
+        {label && <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] animate-pulse">{label}</p>}
+    </div>
+  );
+
+  const TimeframeSelector = () => (
+    <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800 shadow-inner">
+        {[7, 14, 30].map(d => (
+            <button 
+                key={d} 
+                onClick={() => setTimeframe(d)} 
+                className={`px-3 py-1 rounded-md text-[10px] font-black uppercase transition-all ${timeframe === d ? 'bg-blue-600 text-white shadow-lg border border-blue-400' : 'text-gray-500 hover:text-gray-300 border border-transparent'}`}
+            >
+                {d}D
+            </button>
+        ))}
+    </div>
+  );
 
   const formatLocalTime = (isoStr: string | undefined) => {
     if (!isoStr || isoStr === "None") return "--:--:--";
@@ -104,67 +193,154 @@ function App() {
     const wsUrl = `${protocol}//${window.location.host}/api/ws`;
     const ws = new WebSocket(wsUrl);
     ws.onopen = () => setConnected(true);
+    
+    // 實施緩衝區，每秒更新一次狀態，避免 React 高頻率渲染
+    let buffer: FundingRate[] = [];
+    const flushBuffer = () => {
+      if (buffer.length === 0) return;
+      setRates(prev => {
+        const next = {...prev};
+        buffer.forEach(i => { if(i?.exchange && i?.symbol) next[`${i.exchange}:${i.symbol}`] = i; });
+        buffer = [];
+        return next;
+      });
+    };
+    const interval = setInterval(flushBuffer, 1000);
+
     ws.onmessage = (e) => {
         try {
             const data = JSON.parse(e.data);
             const items = Array.isArray(data) ? data : [data];
-            setRates(prev => {
-                const next = {...prev};
-                items.forEach(i => { if(i?.exchange && i?.symbol) next[`${i.exchange}:${i.symbol}`] = i; });
-                return next;
-            });
+            buffer.push(...items);
         } catch {}
     };
-    ws.onclose = () => { setConnected(false); setTimeout(connectWebSocket, 3000); };
+    ws.onclose = () => { 
+      setConnected(false); 
+      clearInterval(interval);
+      setTimeout(connectWebSocket, 3000); 
+    };
     return ws;
   }, []);
 
   useEffect(() => { const ws = connectWebSocket(); return () => ws.close(); }, [connectWebSocket]);
 
+  // --- 優化：秒開邏輯 (LocalStorage + Compressed API) ---
   useEffect(() => {
+    // 1. 優先從本地緩存讀取 (秒開)
+    const cached = localStorage.getItem('quantmatrix_rates_cache');
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (Object.keys(parsed).length > 0) setRates(parsed);
+      } catch (e) { console.error("Cache load error", e); }
+    }
+
     const fetchData = async () => {
+        // 2. 使用壓縮版 API 獲取全市場數據
+        try {
+          const res = await fetch('/api/rates/compressed');
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            const initialRates: Record<string, FundingRate> = {};
+            data.forEach(([sym, ex, rate, interval]) => {
+              initialRates[`${ex}:${sym}`] = {
+                symbol: sym, exchange: ex, rate, interval, timestamp: new Date().toISOString()
+              };
+            });
+            setRates(prev => ({...prev, ...initialRates}));
+            // 寫回快存
+            localStorage.setItem('quantmatrix_rates_cache', JSON.stringify(initialRates));
+          }
+        } catch (e) { console.error("Fetch compressed error", e); }
+
         fetch('/api/analysis/summary').then(res => res.json()).then(setSummary);
         fetch('/api/health').then(res => res.json()).then(setHealth);
     };
     fetchData();
-    const interval = setInterval(fetchData, 15000);
+    const interval = setInterval(fetchData, 30000); // 延長 API 輪詢間隔，主要靠 WS 更新
     return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     if (selectedPair) {
-        fetch(`/api/rates/history/${selectedPair.exchange}/${selectedPair.symbol}`)
+        const cacheKey = `${selectedPair.exchange}_${selectedPair.symbol}_${timeframe}`;
+        if (historyCache[cacheKey]) {
+            setHistory(historyCache[cacheKey]);
+            setLoadingHistory(false);
+            return;
+        }
+
+        setHistory([]); // 清空舊資料，避免渲染舊圖表
+        setLoadingHistory(true);
+        fetch(`/api/rates/history/${selectedPair.exchange}/${selectedPair.symbol}?days=${timeframe}`)
             .then(res => res.json())
-            .then(data => setHistory(Array.isArray(data) ? data : []));
+            .then(data => {
+                const res = Array.isArray(data) ? data : [];
+                setHistory(res);
+                setHistoryCache(prev => ({ ...prev, [cacheKey]: res }));
+                setLoadingHistory(false);
+            })
+            .catch(() => setLoadingHistory(false));
     }
-  }, [selectedPair]);
+  }, [selectedPair, timeframe]); // 移除了 historyCache 依賴
 
   useEffect(() => {
     if (compareSymbol) {
-        fetch(`/api/rates/history_all/${compareSymbol}`)
+        const cacheKey = `all_${compareSymbol}_${timeframe}`;
+        if (historyCache[cacheKey]) {
+            setMultiHistory(historyCache[cacheKey]);
+            setLoadingMulti(false);
+            return;
+        }
+
+        setMultiHistory(null); // 清空舊資料
+        setLoadingMulti(true);
+        fetch(`/api/rates/history_all/${compareSymbol}?days=${timeframe}`)
             .then(res => res.json())
-            .then(setMultiHistory);
-        setVisibleExchanges(ALL_EXCHANGES); // 開啟 Modal 時重置顯示
+            .then(data => {
+                setMultiHistory(data);
+                setHistoryCache(prev => ({ ...prev, [cacheKey]: data }));
+                setLoadingMulti(false);
+            })
+            .catch(() => setLoadingMulti(false));
+        setVisibleExchanges(ALL_EXCHANGES); 
     } else { setMultiHistory(null); }
-  }, [compareSymbol]);
+  }, [compareSymbol, timeframe]); // 移除了 historyCache 依賴
 
   const filteredData = useMemo(() => {
-    const symbolsMap: Record<string, Record<string, number>> = {};
+    const symbolsMap: Record<string, Record<string, {rate: number, interval: number}>> = {};
     Object.values(rates).forEach(r => {
         if (!symbolsMap[r.symbol]) symbolsMap[r.symbol] = {};
-        symbolsMap[r.symbol][r.exchange] = r.rate;
+        symbolsMap[r.symbol][r.exchange] = { rate: r.rate, interval: r.interval || 8 };
     });
 
     let result = Object.keys(symbolsMap).map(sym => {
-        const activeRates = Object.entries(symbolsMap[sym]).filter(([ex]) => selectedExchanges.includes(ex)).map(([_, r]) => r * 1095);
-        const spread = activeRates.length > 1 ? (Math.max(...activeRates) - Math.min(...activeRates)) : 0;
-        return { symbol: sym, rates: symbolsMap[sym], spread, base: sym.replace(/USDT|USDC/i, ''), quote: sym.includes('USDC') ? 'USDC' : 'USDT' };
+        const activeAPRs = Object.entries(symbolsMap[sym])
+            .filter(([ex]) => selectedExchanges.includes(ex))
+            .map(([_, d]) => d.rate * (24 / d.interval) * 365);
+            
+        // 修正：取絕對值最大，因為正負費率皆可獲利 (Long/Short 獲利潛力)
+        const maxAprMagnitude = activeAPRs.length > 0 ? Math.max(...activeAPRs.map(Math.abs)) : 0;
+        const actualMax = activeAPRs.length > 0 ? Math.max(...activeAPRs) : 0;
+        const actualMin = activeAPRs.length > 0 ? Math.min(...activeAPRs) : 0;
+        const spread = activeAPRs.length > 1 ? (actualMax - actualMin) : 0;
+
+        return { 
+            symbol: sym, 
+            rates: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.rate])), 
+            intervals: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.interval])),
+            maxApr: maxAprMagnitude * 100,
+            spread: spread * 100, 
+            base: sym.replace(/USDT|USDC/i, ''), 
+            quote: sym.includes('USDC') ? 'USDC' : 'USDT' 
+        };
     });
 
     if (search) result = result.filter(r => r.symbol.toLowerCase().includes(search.toLowerCase()));
     result.sort((a, b) => {
         let v1: any, v2: any;
         if (sortConfig.key === 'symbol') { v1 = a.symbol; v2 = b.symbol; }
+        else if (sortConfig.key === 'maxApr') { v1 = a.maxApr > 0 ? a.maxApr : undefined; v2 = b.maxApr > 0 ? b.maxApr : undefined; }
         else if (sortConfig.key === 'spread') { v1 = a.spread > 0 ? a.spread : undefined; v2 = b.spread > 0 ? b.spread : undefined; }
         else { v1 = a.rates[sortConfig.key]; v2 = b.rates[sortConfig.key]; }
         if (v1 === undefined) return 1; if (v2 === undefined) return -1;
@@ -176,6 +352,15 @@ function App() {
 
   const currentSymbols = filteredData.slice((page - 1) * pageSize, page * pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
+
+  // 動態計算 Top Payers/Receivers (基於目前選中的交易所)
+  const { topPayers, topReceivers } = useMemo(() => {
+    const allSelectedRates = Object.values(rates).filter(r => selectedExchanges.includes(r.exchange));
+    return {
+      topPayers: [...allSelectedRates].sort((a, b) => b.rate - a.rate).slice(0, 5),
+      topReceivers: [...allSelectedRates].sort((a, b) => a.rate - b.rate).slice(0, 5)
+    };
+  }, [rates, selectedExchanges]);
 
   const handleSort = (key: string) => {
     setSortConfig(prev => ({ key, direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc' }));
@@ -208,44 +393,43 @@ function App() {
         </div>
       </nav>
 
-      <main className="max-w-[1800px] mx-auto p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <main className="w-[98%] max-w-[2000px] mx-auto p-4 md:p-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
             <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg relative group">
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Market Sentiment</div>
                 <div className={`text-2xl font-black italic tracking-tighter ${summary?.market_sentiment === 'Bullish' ? 'text-green-500' : 'text-red-500'}`}>{summary?.market_sentiment || 'NEUTRAL'}</div>
                 <div className="flex items-center gap-2 mt-3">
                     <div className="flex-1 h-1.5 bg-gray-900 rounded-full overflow-hidden flex">
-                        <div className="h-full bg-green-500" style={{ width: `${50 + (summary?.avg_funding_rate || 0) * 1000}%` }}></div>
-                        <div className="h-full bg-red-500" style={{ width: `${50 - (summary?.avg_funding_rate || 0) * 1000}%` }}></div>
+                        <div className="h-full bg-green-500" style={{ width: `${50 + (summary?.avg_apr || 0) * 100}%` }}></div>
+                        <div className="h-full bg-red-500" style={{ width: `${50 - (summary?.avg_apr || 0) * 100}%` }}></div>
                     </div>
                 </div>
             </div>
             <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingUp size={12} className="text-green-500"/> Top Payers</div>
-                <div className="space-y-1.5">{summary?.top_positive?.map((r:any, i:number) => (
-                    <div key={i} className="flex justify-between items-center text-[11px]">
-                        <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-blue-900/30 text-blue-400 px-1 rounded ml-1 uppercase">{r.exchange}</span></span>
-                        <span className="font-black text-green-400">{(r.rate * 100).toFixed(4)}%</span>
-                    </div>
-                ))}</div>
+               <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingUp size={12} className="text-green-500"/> Top Payers</div>
+               <div className="space-y-1.5">{topPayers.map((r, i) => (
+                   <div key={i} className="flex justify-between items-center text-[11px]">
+                       <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-blue-900/30 text-blue-400 px-1 rounded ml-1 uppercase">{r.exchange}</span></span>
+                       <span className="font-black text-green-400">{(r.rate * 100).toFixed(4)}%</span>
+                   </div>
+               ))}</div>
             </div>
             <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingDown size={12} className="text-red-500"/> Top Receivers</div>
-                <div className="space-y-1.5">{summary?.top_negative?.map((r:any, i:number) => (
-                    <div key={i} className="flex justify-between items-center text-[11px]">
-                        <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-red-900/30 text-red-400 px-1 rounded ml-1 uppercase">{r.exchange}</span></span>
-                        <span className="font-black text-red-400">{(r.rate * 100).toFixed(4)}%</span>
-                    </div>
-                ))}</div>
-            </div>
-            <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg flex flex-col justify-center">
+               <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-3 flex items-center gap-2"><TrendingDown size={12} className="text-red-500"/> Top Receivers</div>
+               <div className="space-y-1.5">{topReceivers.map((r, i) => (
+                   <div key={i} className="flex justify-between items-center text-[11px]">
+                       <span className="font-bold text-gray-300 font-mono">{r.symbol} <span className="text-[8px] bg-red-900/30 text-red-400 px-1 rounded ml-1 uppercase">{r.exchange}</span></span>
+                       <span className="font-black text-red-400">{(r.rate * 100).toFixed(4)}%</span>
+                   </div>
+               ))}</div>
+            </div>            <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl p-5 shadow-lg flex flex-col justify-center">
                 <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1 flex items-center gap-2"><ShieldCheck size={14} className="text-blue-500"/> System Core</div>
                 <div className="text-3xl font-black text-white">{filteredData.length}</div>
                 <div className="text-[9px] font-bold text-gray-700 uppercase tracking-tighter">Monitoring {Object.keys(rates).length} Active Channels</div>
             </div>
         </div>
 
-        {selectedPair && history.length > 0 && (
+        {selectedPair && (
             <div className="mb-8 animate-in zoom-in-95 duration-500">
                 <div className="bg-[#080808] border border-blue-900/30 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
                     <div className="absolute top-0 left-0 w-full h-0.5 bg-blue-600/50"></div>
@@ -257,24 +441,85 @@ function App() {
                                 <p className="text-[9px] font-bold text-gray-600 uppercase tracking-[0.2em]">Institutional Historical Analysis</p>
                             </div>
                         </div>
-                        <button onClick={() => setSelectedPair(null)} className="text-gray-600 hover:text-white transition-colors"><X size={20}/></button>
+                        <div className="flex items-center gap-4">
+                            <TimeframeSelector />
+                            <button onClick={() => setSelectedPair(null)} className="text-gray-600 hover:text-white transition-colors"><X size={20}/></button>
+                        </div>
                     </div>
-                    <div className="h-[350px] w-full"><TVChart data={history} /></div>
+                    <div className="min-h-[350px] w-full flex items-center justify-center">
+                        {loadingHistory ? (
+                            <LoadingSpinner label="Fetching Live Exchange History..." />
+                        ) : history.length > 0 ? (
+                            <TVChart data={history} />
+                        ) : (
+                            <div className="text-gray-800 font-black uppercase text-[10px] tracking-widest">No historical data available for this pair</div>
+                        )}
+                    </div>
                 </div>
             </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-3 mb-6 bg-[#080808] p-3 rounded-xl border border-gray-900">
-            {ALL_EXCHANGES.map(ex => (
-                <button key={ex} onClick={() => { setSelectedExchanges(prev => prev.includes(ex) ? prev.filter(e => e !== ex) : [...prev, ex]); setPage(1); }} className={`text-[10px] font-black uppercase flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${selectedExchanges.includes(ex) ? 'bg-blue-600/10 text-blue-400 border border-blue-900/30' : 'text-gray-700 border border-transparent'}`}>
-                    {selectedExchanges.includes(ex) ? <CheckSquare size={12}/> : <Square size={12}/>} {ex}
+        <div className="flex justify-between items-center mb-6">
+            <div className="relative" ref={filterRef}>
+                <button 
+                    onClick={() => setIsFilterOpen(!isFilterOpen)}
+                    className={`flex items-center gap-3 px-6 py-2.5 rounded-xl border font-black uppercase text-[10px] tracking-widest transition-all ${isFilterOpen ? 'bg-blue-600 border-blue-400 text-white shadow-lg shadow-blue-900/20' : 'bg-[#080808] border-gray-900 text-gray-400 hover:border-gray-700'}`}
+                >
+                    <Filter size={14} className={isFilterOpen ? 'text-white' : 'text-blue-500'} />
+                    Exchanges ({selectedExchanges.length}/{ALL_EXCHANGES.length})
+                    <ChevronDown size={14} className={`transition-transform duration-300 ${isFilterOpen ? 'rotate-180' : ''}`} />
                 </button>
-            ))}
+
+                {isFilterOpen && (
+                    <div className="absolute left-0 mt-3 w-64 bg-[#0a0a0a] border border-gray-800 rounded-2xl shadow-3xl z-[60] overflow-hidden animate-in slide-in-from-top-2 duration-200">
+                        <div className="p-3 border-b border-gray-900 flex gap-2">
+                            <button 
+                                onClick={() => { setSelectedExchanges(ALL_EXCHANGES); setPage(1); }}
+                                className="flex-1 text-[9px] font-black uppercase py-2 rounded-lg bg-gray-900 text-gray-400 hover:text-white hover:bg-gray-800 transition-all border border-gray-800"
+                            >
+                                Show All
+                            </button>
+                            <button 
+                                onClick={() => { setSelectedExchanges([]); setPage(1); }}
+                                className="flex-1 text-[9px] font-black uppercase py-2 rounded-lg bg-gray-900 text-gray-400 hover:text-white hover:bg-gray-800 transition-all border border-gray-800"
+                            >
+                                Hide All
+                            </button>
+                        </div>
+                        <div className="max-h-64 overflow-y-auto p-2 custom-scrollbar">
+                            {ALL_EXCHANGES.map(ex => {
+                                const isSelected = selectedExchanges.includes(ex);
+                                return (
+                                    <button 
+                                        key={ex} 
+                                        onClick={() => { setSelectedExchanges(prev => isSelected ? prev.filter(e => e !== ex) : [...prev, ex]); setPage(1); }}
+                                        className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl transition-all mb-1 ${isSelected ? 'bg-blue-600/5 text-white' : 'hover:bg-white/5 text-gray-500'}`}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className={`w-4 h-4 rounded-md border flex items-center justify-center transition-all ${isSelected ? 'bg-blue-600 border-blue-400' : 'border-gray-800'}`}>
+                                                {isSelected && <CheckSquare size={10} className="text-white" />}
+                                            </div>
+                                            <span className="text-[10px] font-black uppercase tracking-widest">{ex}</span>
+                                        </div>
+                                        <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}></div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+            </div>
+            
+            <div className="flex items-center gap-4 bg-[#080808] px-4 py-2 rounded-xl border border-gray-900">
+                <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest">Global Aggregation</span>
+                <Activity size={14} className="text-blue-500 animate-pulse" />
+            </div>
         </div>
 
+        {viewMode === 'matrix' ? (
         <div className="bg-[#0a0a0a] rounded-2xl border border-gray-900 overflow-hidden shadow-2xl">
-            <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse table-fixed min-w-[1200px]">
+            <div className="overflow-x-auto custom-scrollbar">
+                <table className="w-full text-left border-collapse table-fixed min-w-[1000px]">
                     <thead>
                         <tr className="bg-[#0f0f0f] border-b border-gray-800 text-[10px] font-black text-gray-600 uppercase tracking-widest">
                             <th className="w-48 px-8 py-6 sticky left-0 bg-[#0f0f0f] z-30 cursor-pointer group" onClick={() => handleSort('symbol')}>
@@ -283,13 +528,48 @@ function App() {
                             {selectedExchanges.map(ex => (
                                 <th key={ex} className="px-2 py-6 text-center cursor-pointer border-l border-gray-900/50 hover:text-white transition-colors uppercase" onClick={() => handleSort(ex)}>{ex}</th>
                             ))}
-                            <th className="w-44 px-8 py-6 text-center border-l border-gray-900/50 cursor-pointer" onClick={() => handleSort('spread')}>Spread APR</th>
+                            <th className="w-40 px-6 py-6 text-center border-l border-gray-900/50 cursor-pointer group/max relative" onClick={() => handleSort('maxApr')}>
+                                <div className="flex items-center justify-center gap-1.5">
+                                    <span>Max APR</span>
+                                    <div className="relative group/tip">
+                                        <ShieldCheck size={12} className="text-blue-500 cursor-help" />
+                                        <div className="absolute top-full right-0 mt-3 w-64 p-4 bg-[#0d0d0d] border border-gray-800 rounded-[20px] shadow-3xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-all z-[9999] text-left ring-1 ring-white/5">
+                                            <p className="text-[10px] font-black text-white uppercase mb-2">Single-Venue Max</p>
+                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">The highest available annualized yield from any single selected exchange.</p>
+                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-blue-400">APR = Rate × (24/Int) × 365</div>
+                                            <div className="absolute bottom-full right-1 border-[6px] border-transparent border-b-[#0d0d0d]"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </th>
+                            <th className="w-40 px-6 py-6 text-center border-l border-gray-900/50 cursor-pointer group/spread relative" onClick={() => handleSort('spread')}>
+                                <div className="flex items-center justify-center gap-1.5">
+                                    <span>Spread APR</span>
+                                    <div className="relative group/tip">
+                                        <Zap size={12} className="text-purple-500 cursor-help" />
+                                        <div className="absolute top-full right-0 mt-3 w-64 p-4 bg-[#0d0d0d] border border-gray-800 rounded-[20px] shadow-3xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-all z-[9999] text-left ring-1 ring-white/5">
+                                            <p className="text-[10px] font-black text-white uppercase mb-2">Arbitrage Gap</p>
+                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">Maximum delta-neutral potential between selected venues.</p>
+                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-purple-400">Spread = Max(APR) - Min(APR)</div>
+                                            <div className="absolute bottom-full right-1 border-[6px] border-transparent border-b-[#0d0d0d]"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-900">
-                        {currentSymbols.map(row => (
+                        {Object.keys(rates).length === 0 ? (
+                            Array.from({ length: 5 }).map((_, i) => (
+                                <tr key={i} className="animate-pulse">
+                                    <td className="px-8 py-8"><div className="h-4 bg-gray-900 rounded w-24"></div></td>
+                                    {selectedExchanges.map(ex => <td key={ex} className="px-2 py-8"><div className="h-4 bg-gray-900 rounded mx-auto w-12"></div></td>)}
+                                    <td className="px-8 py-8"><div className="h-4 bg-gray-900 rounded mx-auto w-16"></div></td>
+                                </tr>
+                            ))
+                        ) : currentSymbols.map(row => (
                             <tr key={row.symbol} className="hover:bg-blue-600/[0.03] transition-colors group">
-                                <td className="px-8 py-5 sticky left-0 bg-[#0a0a0a] z-20 border-r border-gray-900 font-black text-white text-sm tracking-tighter cursor-pointer group" onClick={() => setCompareSymbol(row.symbol)}>
+                                <td className="px-8 py-5 sticky left-0 bg-[#0a0a0a] z-20 border-r border-gray-900 font-black text-white text-sm tracking-tighter cursor-pointer group" onClick={() => { setCompareSymbol(row.symbol); setTimeframe(7); }}>
                                     <div className="flex items-center justify-between">
                                         <span>{row.base} <span className="text-[10px] text-gray-700 ml-1 font-bold">{row.quote}</span></span>
                                         <ExternalLink size={12} className="text-gray-800 group-hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all" />
@@ -297,18 +577,23 @@ function App() {
                                 </td>
                                 {selectedExchanges.map(ex => {
                                     const rate = row.rates[ex];
+                                    const interval = row.intervals[ex];
                                     const val = (rate || 0) * 100;
                                     const opacity = Math.min(Math.abs(val) / 0.05, 1);
                                     const style = rate === undefined ? { backgroundColor: 'transparent' } : { backgroundColor: val > 0 ? `rgba(16, 185, 129, ${0.1 + opacity * 0.7})` : `rgba(239, 68, 68, ${0.1 + opacity * 0.7})` };
                                     return (
                                         <td key={ex} className="p-0 border-l border-gray-900/20">
-                                            <div style={style} className="w-full h-16 flex items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20" onClick={() => rate !== undefined && setSelectedPair({exchange: ex, symbol: row.symbol})}>
+                                            <div style={style} className="w-full h-16 flex flex-col items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20" onClick={() => { if (rate !== undefined) { setSelectedPair({exchange: ex, symbol: row.symbol}); setTimeframe(7); }}}>
                                                 <span className={`font-mono text-[11px] font-bold ${rate !== undefined ? 'text-white' : 'text-gray-800/50'}`}>{rate !== undefined ? `${(rate * 100).toFixed(4)}%` : '--'}</span>
+                                                {rate !== undefined && <span className="text-[8px] font-black opacity-40 text-white uppercase mt-0.5">{interval}H</span>}
                                             </div>
                                         </td>
                                     );
                                 })}
-                                <td className="px-8 py-5 text-center border-l border-gray-900 font-black text-xs text-purple-500">
+                                <td className="px-6 py-5 text-center border-l border-gray-900 font-black text-xs text-blue-500">
+                                    {row.maxApr > 0 ? `${row.maxApr.toFixed(1)}%` : '--'}
+                                </td>
+                                <td className="px-6 py-5 text-center border-l border-gray-900 font-black text-xs text-purple-500">
                                     {row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--'}
                                 </td>
                             </tr>
@@ -330,6 +615,43 @@ function App() {
                 </div>
             </div>
         </div>
+        ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {currentSymbols.map(row => (
+                    <div key={row.symbol} className="bg-[#080808] border border-gray-900 rounded-2xl p-4 hover:border-blue-900/50 transition-all group overflow-hidden relative">
+                        <div className="flex justify-between items-center mb-4">
+                            <h4 className="text-sm font-black text-white italic">{row.symbol}</h4>
+                            <button onClick={() => setCompareSymbol(row.symbol)} className="text-[8px] font-black uppercase text-blue-500 hover:text-white">Compare</button>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1">
+                            {selectedExchanges.map(ex => {
+                                const rate = row.rates[ex];
+                                const val = (rate || 0) * 100;
+                                const opacity = Math.min(Math.abs(val) / 0.05, 1);
+                                const color = rate === undefined ? '#111' : (val > 0 ? `rgba(16, 185, 129, ${0.2 + opacity * 0.8})` : `rgba(239, 68, 68, ${0.2 + opacity * 0.8})`);
+                                return (
+                                    <div 
+                                        key={ex} 
+                                        title={`${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}`}
+                                        className="h-8 rounded-sm relative group/cell cursor-pointer"
+                                        style={{ backgroundColor: color }}
+                                        onClick={() => rate !== undefined && setSelectedPair({exchange: ex, symbol: row.symbol})}
+                                    >
+                                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/cell:opacity-100 transition-opacity">
+                                            <span className="text-[6px] font-black text-white uppercase">{ex.substring(0,3)}</span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div className="mt-3 pt-3 border-t border-gray-900/50 flex justify-between items-center">
+                             <div className="text-[8px] font-bold text-gray-600 uppercase">Spread APR</div>
+                             <div className="text-[10px] font-black text-purple-500">{row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--'}</div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        )}
 
         {compareSymbol && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/95 backdrop-blur-md animate-in fade-in duration-300">
@@ -347,23 +669,30 @@ function App() {
                                     <p className="text-xs font-black text-gray-600 uppercase tracking-[0.5em]">Cross-Exchange Comparative History</p>
                                 </div>
                             </div>
-                            <div className="text-right">
-                                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Visibility</div>
-                                <div className="flex gap-2">
-                                    <button onClick={() => setVisibleExchanges(ALL_EXCHANGES)} className="text-[9px] bg-[#111] px-3 py-1 rounded-full border border-gray-800 hover:text-white uppercase font-bold">Show All</button>
-                                    <button onClick={() => setVisibleExchanges([])} className="text-[9px] bg-[#111] px-3 py-1 rounded-full border border-gray-800 hover:text-white uppercase font-bold">Hide All</button>
+                            <div className="text-right flex flex-col items-end gap-3">
+                                <div className="flex gap-4 items-center">
+                                    <div className="flex flex-col items-end">
+                                        <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Timeframe</div>
+                                        <TimeframeSelector />
+                                    </div>
+                                    <div className="flex flex-col items-end">
+                                        <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-1">Visibility</div>
+                                        <div className="flex gap-2">
+                                            <button onClick={() => setVisibleExchanges(ALL_EXCHANGES)} className="text-[9px] bg-[#111] px-3 py-1 rounded-full border border-gray-800 hover:text-white uppercase font-bold">Show All</button>
+                                            <button onClick={() => setVisibleExchanges([])} className="text-[9px] bg-[#111] px-3 py-1 rounded-full border border-gray-800 hover:text-white uppercase font-bold">Hide All</button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                         
                         <div className="bg-[#040404] rounded-[32px] p-8 border border-gray-900 shadow-inner min-h-[500px] flex items-center justify-center relative">
-                            {multiHistory ? (
+                            {loadingMulti ? (
+                                <LoadingSpinner label="Synthesizing Global Market Data..." />
+                            ) : multiHistory ? (
                                 <TVChart data={multiHistory} isCompare={true} visibleExchanges={visibleExchanges} />
                             ) : (
-                                <div className="flex flex-col items-center gap-4 text-gray-700 font-black uppercase tracking-widest animate-pulse">
-                                    <Activity className="animate-spin text-blue-500" />
-                                    Synthesizing Global Market Data...
-                                </div>
+                                <div className="text-gray-800 font-black uppercase text-[10px] tracking-widest">Unable to aggregate market history</div>
                             )}
                         </div>
 

@@ -32,8 +32,6 @@ services:
       context: .
       dockerfile: backend.Dockerfile
     restart: always
-    ports:
-      - "8000:8000"
     environment:
       - POSTGRES_SERVER=db
       - REDIS_HOST=redis

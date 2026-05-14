@@ -1,6 +1,8 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from backend.app.services.collector import collector
 from backend.app.services.websocket_manager import ws_manager
+from backend.app.db.session import SessionLocal
+from backend.app.models.funding_rate import FundingRate
 from typing import List
 import logging
 import json
@@ -8,9 +10,29 @@ import re
 import asyncio
 from datetime import datetime, timedelta
 import ccxt.async_support as ccxt_async
+from sqlalchemy import select, desc
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
+    """Query funding rate history from local PostgreSQL (fast, no external API)."""
+    clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
+    since = datetime.utcnow() - timedelta(days=days)
+    try:
+        async with SessionLocal() as session:
+            stmt = select(FundingRate).where(
+                FundingRate.exchange == exchange.lower(),
+                FundingRate.symbol == clean_sym,
+                FundingRate.timestamp >= since
+            ).order_by(FundingRate.timestamp.asc())
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            if rows:
+                return [{"timestamp": r.timestamp.isoformat(), "rate": r.rate} for r in rows]
+    except Exception as e:
+        logger.error(f"DB read error: {exchange}/{symbol}: {e}")
+    return []
 
 @router.get("/rates/compressed")
 async def get_compressed_rates():
@@ -241,7 +263,35 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
             logger.error(f"AsterDEX history failed: {e}")
         return []
 
-    if exchange.lower() in ("aden", "lighter"):
+    if exchange.lower() == "lighter":
+        return []
+
+    # DB has the best data (accumulated from collectors) — check first
+    db_hist = await get_history_from_db(exchange, symbol, days)
+    if db_hist:
+        try:
+            from backend.app.main import redis
+            if redis:
+                await redis.setex(cache_key, 900, json.dumps(db_hist))
+        except: pass
+        return db_hist
+
+    # For Aden: try authenticated API if credentials are configured
+    if exchange.lower() == "aden":
+        from backend.app.core.config import settings
+        if settings.aden_auth_available:
+            from backend.app.services.aden_api import init, fetch_funding_rate_history
+            init(settings.ADEN_API_USER, settings.ADEN_API_SIGNER, settings.ADEN_API_PRIVATE_KEY)
+            res = await fetch_funding_rate_history(symbol, limit=500)
+            if res:
+                res.sort(key=lambda x: x['timestamp'])
+                try:
+                    from backend.app.main import redis
+                    if redis:
+                        await redis.setex(cache_key, 900, json.dumps(res))
+                except: pass
+                return res
+        # No auth configured or API failed — DB will accumulate over time
         return []
 
     try:

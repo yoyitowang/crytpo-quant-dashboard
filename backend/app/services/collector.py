@@ -119,7 +119,10 @@ class DataCollector:
             "coinw": self._coinw_handler, 
             "mexc": self._mexc_handler,
             "bingx": self._bingx_handler,
-            "aden": self._aden_handler
+            "aden": self._aden_handler,
+            "hyperliquid": self._hyperliquid_handler,
+            "asterdex": self._asterdex_handler,
+            "lighter": self._lighter_handler
         }
         self.callbacks: List[Callable] = []
         self.latest_rates: Dict[str, Dict[str, Any]] = {}
@@ -644,5 +647,125 @@ class DataCollector:
                 except Exception as e:
                     logger.error(f"Aden Handler Failed: {e}")
                     await asyncio.sleep(15)
+
+    async def _hyperliquid_handler(self):
+        """Hyperliquid DEX — REST API: POST /info with type=metaAndAssetCtxs
+        Returns 230 USDC perpetual pairs with funding, markPx, openInterest, etc.
+        All pairs have a 1-hour funding interval.
+        Symbol format: BTC/USDC:USDC → worker cleans to BTCUSDC
+        """
+        url = "https://api.hyperliquid.xyz/info"
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try:
+                    async with session.post(url, json={"type": "metaAndAssetCtxs"}, timeout=15) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            meta = data[0]
+                            ctxs = data[1]
+                            batch = []
+                            for m, c in zip(meta['universe'], ctxs):
+                                name = m['name']
+                                funding = c.get('funding')
+                                if funding is None:
+                                    continue
+                                mark = c.get('markPx')
+                                batch.append({
+                                    "exchange": "hyperliquid",
+                                    "symbol": f"{name}/USDC:USDC",
+                                    "rate": float(funding),
+                                    "mark_price": float(mark) if mark else None,
+                                    "interval": 1,
+                                    "timestamp": datetime.utcnow()
+                                })
+                            if batch:
+                                await self._notify_callbacks(batch)
+                    await asyncio.sleep(30)
+                except Exception as e:
+                    logger.error(f"Hyperliquid Handler Failed: {e}")
+                    await asyncio.sleep(15)
+
+    async def _asterdex_handler(self):
+        """AsterDEX DEX — REST API: GET /fapi/v3/premiumIndex (Binance-variant API)
+        Returns 400+ USDT perpetual pairs with markPrice, lastFundingRate, nextFundingTime.
+        Base URL: https://fapi.asterdex.com
+        Symbol format: BTCUSDT — clean, no normalization needed.
+        """
+        pairs_url = "https://fapi.asterdex.com/fapi/v3/premiumIndex"
+        info_url = "https://fapi.asterdex.com/fapi/v3/exchangeInfo"
+        fund_url = "https://fapi.asterdex.com/fapi/v3/fundingInfo"
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try:
+                    async with session.get(info_url, timeout=15) as info_resp:
+                        info = await info_resp.json()
+                        trading_syms = {s['symbol'] for s in info['symbols'] if s.get('status') == 'TRADING'}
+
+                    intervals = {}
+                    async with session.get(fund_url, timeout=15) as fund_resp:
+                        fi = await fund_resp.json()
+                        intervals = {x['symbol']: int(x.get('fundingIntervalHours', 8)) for x in fi}
+
+                    async with session.get(pairs_url, timeout=15) as resp:
+                        data = await resp.json()
+                        batch = []
+                        for item in data:
+                            sym = item.get('symbol', '')
+                            if sym not in trading_syms:
+                                continue
+                            rate = item.get('lastFundingRate')
+                            if rate is None:
+                                continue
+                            mark = item.get('markPrice')
+                            next_ts = item.get('nextFundingTime')
+                            settle_time = datetime.fromtimestamp(next_ts / 1000) if next_ts else None
+                            interval = intervals.get(sym, 8)
+                            batch.append({
+                                "exchange": "asterdex",
+                                "symbol": sym,
+                                "rate": float(rate),
+                                "mark_price": float(mark) if mark else None,
+                                "settlement_time": settle_time,
+                                "interval": interval,
+                                "timestamp": datetime.utcnow()
+                            })
+                        if batch:
+                            await self._notify_callbacks(batch)
+                    await asyncio.sleep(30)
+                except Exception as e:
+                    logger.error(f"AsterDEX Handler Failed: {e}")
+                    await asyncio.sleep(15)
+
+    async def _lighter_handler(self):
+        """Lighter DEX — via CCXT (public, no API key needed).
+        fetchFundingRates() returns ~167 USDC perpetual pairs.
+        Note: CCXT does not return markPrice or nextFundingTimestamp for Lighter.
+        Symbol format: LINK/USDC:USDC → worker cleans to LINKUSDC.
+        """
+        while True:
+            try:
+                def sync_fetch():
+                    ex = ccxt_sync.lighter()
+                    return ex.fetch_funding_rates()
+                rates = await asyncio.to_thread(sync_fetch)
+                batch = []
+                for sym, rate in rates.items():
+                    fr = rate.get('fundingRate')
+                    if fr is None:
+                        continue
+                    batch.append({
+                        "exchange": "lighter",
+                        "symbol": sym,
+                        "rate": float(fr),
+                        "mark_price": None,
+                        "interval": 1,
+                        "timestamp": datetime.utcnow()
+                    })
+                if batch:
+                    await self._notify_callbacks(batch)
+                await asyncio.sleep(30)
+            except Exception as e:
+                logger.error(f"Lighter Handler Failed: {e}")
+                await asyncio.sleep(15)
 
 collector = DataCollector()

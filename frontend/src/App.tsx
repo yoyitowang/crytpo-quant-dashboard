@@ -109,12 +109,14 @@ function App() {
   const { rules, events, activeToastIds, soundEnabled, addRule, removeRule, toggleRule, toggleSound, dismissToast, checkAlerts } = useAlerts();
   const [history, setHistory] = useState<any[]>([]);
   const [multiHistory, setMultiHistory] = useState<any>(null);
+  const [historyStatus, setHistoryStatus] = useState<Record<string, string>>({});
   const [selectedPair, setSelectedPair] = useState<{exchange: string, symbol: string} | null>(null);
   const [compareSymbol, setCompareSymbol] = useState<string | null>(null);
   const [timeframe, setTimeframe] = useState<number>(7);
   const [visibleExchanges, setVisibleExchanges] = useState<string[]>(ALL_EXCHANGES);
   const [connected, setConnected] = useState(false);
   const [viewMode, setViewMode] = useState<'matrix' | 'heatplot'>('matrix');
+  const [dataMode, setDataMode] = useState<'funding' | 'all' | 'price'>('funding');
   const [search, setSearch] = useState('');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const filterRef = useRef<HTMLDivElement>(null);
@@ -296,21 +298,29 @@ function App() {
     if (compareSymbol) {
         const cacheKey = `all_${compareSymbol}_${timeframe}`;
         if (historyCache[cacheKey]) {
-            setMultiHistory(historyCache[cacheKey]);
+            const cached = historyCache[cacheKey];
+            setMultiHistory(cached.data || cached);
+            setHistoryStatus(cached.status || {});
             setLoadingMulti(false);
             return;
         }
 
-        setMultiHistory(null); // 清空舊資料
+        setMultiHistory({});
+        setHistoryStatus({});
         setLoadingMulti(true);
         fetch(`/api/rates/history_all/${compareSymbol}?days=${timeframe}`)
             .then(res => res.json())
             .then(data => {
-                setMultiHistory(data);
+                const hist = data.data || data;
+                setMultiHistory(hist);
+                setHistoryStatus(data.status || {});
                 setHistoryCache(prev => ({ ...prev, [cacheKey]: data }));
                 setLoadingMulti(false);
             })
-            .catch(() => setLoadingMulti(false));
+            .catch(() => {
+                setLoadingMulti(false);
+                setHistoryStatus(prev => ({ ...prev, _error: 'fetch_failed' }));
+            });
         setVisibleExchanges(ALL_EXCHANGES); 
     } else { setMultiHistory(null); }
   }, [compareSymbol, timeframe]); // 移除了 historyCache 依賴
@@ -333,13 +343,23 @@ function App() {
         const actualMin = activeAPRs.length > 0 ? Math.min(...activeAPRs) : 0;
         const spread = activeAPRs.length > 1 ? (actualMax - actualMin) : 0;
 
+        const activePrices = Object.entries(symbolsMap[sym])
+            .filter(([ex]) => selectedExchanges.includes(ex))
+            .map(([_, d]) => d.markPrice)
+            .filter((p): p is number => p !== undefined && p !== null);
+        const maxPrice = activePrices.length > 0 ? Math.max(...activePrices) : 0;
+        const minPrice = activePrices.length > 0 ? Math.min(...activePrices) : 0;
+        const priceSpread = activePrices.length > 1 ? (maxPrice - minPrice) : 0;
+
         return { 
             symbol: sym, 
             rates: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.rate])), 
             intervals: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.interval])),
             markPrices: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.markPrice])),
             maxApr: maxAprMagnitude * 100,
-            spread: spread * 100, 
+            spread: spread * 100,
+            maxPrice,
+            priceSpread,
             base: sym.replace(/USDT|USDC/i, ''), 
             quote: sym.includes('USDC') ? 'USDC' : 'USDT' 
         };
@@ -351,6 +371,8 @@ function App() {
         if (sortConfig.key === 'symbol') { v1 = a.symbol; v2 = b.symbol; }
         else if (sortConfig.key === 'maxApr') { v1 = a.maxApr > 0 ? a.maxApr : undefined; v2 = b.maxApr > 0 ? b.maxApr : undefined; }
         else if (sortConfig.key === 'spread') { v1 = a.spread > 0 ? a.spread : undefined; v2 = b.spread > 0 ? b.spread : undefined; }
+        else if (sortConfig.key === 'maxPrice') { v1 = a.maxPrice > 0 ? a.maxPrice : undefined; v2 = b.maxPrice > 0 ? b.maxPrice : undefined; }
+        else if (sortConfig.key === 'priceSpread') { v1 = a.priceSpread > 0 ? a.priceSpread : undefined; v2 = b.priceSpread > 0 ? b.priceSpread : undefined; }
         else { v1 = a.rates[sortConfig.key]; v2 = b.rates[sortConfig.key]; }
         if (v1 === undefined) return 1; if (v2 === undefined) return -1;
         const res = v1 > v2 ? 1 : -1;
@@ -388,10 +410,15 @@ function App() {
             <Zap size={22} className="text-blue-500 fill-blue-500" />
             <h1 className="text-xl font-black text-white italic tracking-tighter uppercase">QuantMatrix v11.6</h1>
           </div>
-          <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800">
-             <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
-             <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
-          </div>
+           <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800">
+              <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
+              <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
+           </div>
+           <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800 gap-0.5">
+              <button onClick={() => setDataMode('funding')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'funding' ? 'bg-green-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Funding</button>
+              <button onClick={() => setDataMode('all')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'all' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>All</button>
+              <button onClick={() => setDataMode('price')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'price' ? 'bg-amber-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Price</button>
+           </div>
         </div>
         <div className="flex items-center gap-6">
             <div className="flex flex-col items-end">
@@ -541,29 +568,29 @@ function App() {
                             {selectedExchanges.map(ex => (
                                 <th key={ex} className="px-2 py-6 text-center cursor-pointer border-l border-gray-900/50 hover:text-white transition-colors uppercase" onClick={() => handleSort(ex)}>{ex}</th>
                             ))}
-                            <th className="w-40 px-6 py-6 text-center border-l border-gray-900/50 cursor-pointer group/max relative" onClick={() => handleSort('maxApr')}>
+                            <th className="w-40 px-6 py-6 text-center border-l border-gray-900/50 cursor-pointer group/max relative" onClick={() => handleSort(dataMode === 'price' ? 'maxPrice' : 'maxApr')}>
                                 <div className="flex items-center justify-center gap-1.5">
-                                    <span>Max APR</span>
+                                    <span>{dataMode === 'price' ? 'Max Price' : 'Max APR'}</span>
                                     <div className="relative group/tip">
                                         <ShieldCheck size={12} className="text-blue-500 cursor-help" />
                                         <div className="absolute top-full right-0 mt-3 w-64 p-4 bg-[#0d0d0d] border border-gray-800 rounded-[20px] shadow-3xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-all z-[9999] text-left ring-1 ring-white/5">
-                                            <p className="text-[10px] font-black text-white uppercase mb-2">Single-Venue Max</p>
-                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">The highest available annualized yield from any single selected exchange.</p>
-                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-blue-400">APR = Rate × (24/Int) × 365</div>
+                                            <p className="text-[10px] font-black text-white uppercase mb-2">{dataMode === 'price' ? 'Highest Mark Price' : 'Single-Venue Max APR'}</p>
+                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">{dataMode === 'price' ? 'The highest mark price across all selected exchanges.' : 'The highest available annualized yield from any single selected exchange.'}</p>
+                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-blue-400">{dataMode === 'price' ? 'Max price among selected venues' : 'APR = Rate × (24/Int) × 365'}</div>
                                             <div className="absolute bottom-full right-1 border-[6px] border-transparent border-b-[#0d0d0d]"></div>
                                         </div>
                                     </div>
                                 </div>
                             </th>
-                            <th className="w-40 px-6 py-6 text-center border-l border-gray-900/50 cursor-pointer group/spread relative" onClick={() => handleSort('spread')}>
+                            <th className="w-40 px-6 py-6 text-center border-l border-gray-900/50 cursor-pointer group/spread relative" onClick={() => handleSort(dataMode === 'price' ? 'priceSpread' : 'spread')}>
                                 <div className="flex items-center justify-center gap-1.5">
-                                    <span>Spread APR</span>
+                                    <span>{dataMode === 'price' ? 'Price Gap' : 'Spread APR'}</span>
                                     <div className="relative group/tip">
                                         <Zap size={12} className="text-purple-500 cursor-help" />
                                         <div className="absolute top-full right-0 mt-3 w-64 p-4 bg-[#0d0d0d] border border-gray-800 rounded-[20px] shadow-3xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-all z-[9999] text-left ring-1 ring-white/5">
-                                            <p className="text-[10px] font-black text-white uppercase mb-2">Arbitrage Gap</p>
-                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">Maximum delta-neutral potential between selected venues.</p>
-                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-purple-400">Spread = Max(APR) - Min(APR)</div>
+                                            <p className="text-[10px] font-black text-white uppercase mb-2">{dataMode === 'funding' ? 'Arbitrage Gap' : 'Price Gap'}</p>
+                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">{dataMode === 'funding' ? 'Maximum delta-neutral potential between selected venues.' : 'Price difference between highest and lowest venue.'}</p>
+                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-purple-400">{dataMode === 'funding' ? 'Spread = Max(APR) - Min(APR)' : 'Spread = Max Price - Min Price'}</div>
                                             <div className="absolute bottom-full right-1 border-[6px] border-transparent border-b-[#0d0d0d]"></div>
                                         </div>
                                     </div>
@@ -592,9 +619,25 @@ function App() {
                                     const rate = row.rates[ex];
                                     const interval = row.intervals[ex];
                                     const markPrice = row.markPrices?.[ex];
-                                    const val = (rate || 0) * 100;
-                                    const opacity = Math.min(Math.abs(val) / 0.05, 1);
-                                    const style = rate === undefined ? { backgroundColor: 'transparent' } : { backgroundColor: val > 0 ? `rgba(16, 185, 129, ${0.1 + opacity * 0.7})` : `rgba(239, 68, 68, ${0.1 + opacity * 0.7})` };
+
+                                    const showFunding = dataMode === 'funding' || dataMode === 'all';
+                                    const showPrice = dataMode === 'price' || dataMode === 'all';
+                                    const primaryVal = showFunding ? (rate || 0) * 100 : (markPrice || 0);
+                                    const hasFunding = rate !== undefined;
+                                    const hasPrice = markPrice !== undefined;
+                                    const hasData = showFunding ? hasFunding : hasPrice;
+
+                                    let opacity = 0;
+                                    let style = { backgroundColor: 'transparent' };
+                                    if (hasData) {
+                                        if (showFunding) {
+                                            opacity = Math.min(Math.abs(primaryVal) / 0.05, 1);
+                                            style = { backgroundColor: primaryVal > 0 ? `rgba(16, 185, 129, ${0.1 + opacity * 0.7})` : `rgba(239, 68, 68, ${0.1 + opacity * 0.7})` };
+                                        } else {
+                                            opacity = Math.min(primaryVal / 100000, 1);
+                                            style = { backgroundColor: `rgba(245, 158, 11, ${0.1 + opacity * 0.7})` };
+                                        }
+                                    }
 
                                     let healthColor = '#22c55e';
                                     if (rate !== undefined) {
@@ -602,26 +645,38 @@ function App() {
                                         healthColor = redFlags === 0 ? '#22c55e' : redFlags === 1 ? '#eab308' : '#ef4444';
                                     }
 
+                                    const handleClick = () => {
+                                        if (rate !== undefined && markPrice) {
+                                            setSelectedPair({exchange: ex, symbol: row.symbol});
+                                            setTimeframe(7);
+                                        }
+                                    };
+
                                     return (
                                         <td key={ex} className="p-0 border-l border-gray-900/20">
-                                            <div style={style} className="w-full h-[76px] flex flex-col items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20 relative group/cell" onClick={() => { if (rate !== undefined) { setSelectedPair({exchange: ex, symbol: row.symbol}); setTimeframe(7); }}}>
-                                                {rate !== undefined && <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full" style={{ backgroundColor: healthColor }} title={healthColor === '#22c55e' ? 'Valid' : healthColor === '#eab308' ? 'Warning' : 'Suspicious'} />}
-                                                <span className={`font-mono text-[11px] font-bold ${rate !== undefined ? 'text-white' : 'text-gray-800/50'}`}>{rate !== undefined ? `${(rate * 100).toFixed(4)}%` : '--'}</span>
+                                            <div style={style} className="w-full h-[76px] flex flex-col items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20 relative group/cell" onClick={handleClick}>
+                                                {showFunding && rate !== undefined && <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full" style={{ backgroundColor: healthColor }} title={healthColor === '#22c55e' ? 'Valid' : healthColor === '#eab308' ? 'Warning' : 'Suspicious'} />}
+                                                <span className={`font-mono text-[11px] font-bold ${hasData ? 'text-white' : 'text-gray-800/50'}`}>
+                                                    {showFunding ? (rate !== undefined ? `${(rate * 100).toFixed(4)}%` : '--') : (markPrice !== undefined ? formatPrice(Number(markPrice)) : '--')}
+                                                </span>
+                                                {dataMode === 'all' && rate !== undefined && (
+                                                    <span className="text-[8px] font-mono text-white/40 mt-0.5">{markPrice ? formatPrice(Number(markPrice)) : ''}</span>
+                                                )}
+                                                {dataMode === 'all' && markPrice !== undefined && rate === undefined && (
+                                                    <span className="text-[8px] font-mono text-white/40 mt-0.5">{rate !== undefined ? `${(rate * 100).toFixed(4)}%` : ''}</span>
+                                                )}
                                                 {rate !== undefined && (
-                                                    <>
-                                                        <span className="text-[8px] font-mono text-white/60 mt-0.5">{markPrice ? formatPrice(Number(markPrice)) : ''}</span>
-                                                        <span className="text-[8px] font-black opacity-40 text-white uppercase mt-0.5">{interval}H</span>
-                                                    </>
+                                                    <span className="text-[8px] font-black opacity-40 text-white uppercase mt-0.5">{showFunding ? `${interval}H` : `${interval}H`}</span>
                                                 )}
                                             </div>
                                         </td>
                                     );
                                 })}
                                 <td className="px-6 py-5 text-center border-l border-gray-900 font-black text-xs text-blue-500">
-                                    {row.maxApr > 0 ? `${row.maxApr.toFixed(1)}%` : '--'}
+                                    {dataMode === 'price' ? (row.maxPrice > 0 ? formatPrice(row.maxPrice) : '--') : (row.maxApr > 0 ? `${row.maxApr.toFixed(1)}%` : '--')}
                                 </td>
                                 <td className="px-6 py-5 text-center border-l border-gray-900 font-black text-xs text-purple-500">
-                                    {row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--'}
+                                    {dataMode === 'price' ? (row.priceSpread > 0 ? formatPrice(row.priceSpread) : '--') : (row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--')}
                                 </td>
                             </tr>
                         ))}
@@ -654,27 +709,42 @@ function App() {
                             {selectedExchanges.map(ex => {
                                 const rate = row.rates[ex];
                                 const markPrice = row.markPrices?.[ex];
-                                const val = (rate || 0) * 100;
-                                const opacity = Math.min(Math.abs(val) / 0.05, 1);
-                                const color = rate === undefined ? '#111' : (val > 0 ? `rgba(16, 185, 129, ${0.2 + opacity * 0.8})` : `rgba(239, 68, 68, ${0.2 + opacity * 0.8})`);
+                                const showFunding = dataMode === 'funding' || dataMode === 'all';
+                                const showPrice = dataMode === 'price' || dataMode === 'all';
+                                const displayVal = showFunding ? (rate || 0) * 100 : (markPrice || 0);
+                                const hasData = showFunding ? rate !== undefined : markPrice !== undefined;
+
+                                let color = '#111';
+                                if (hasData) {
+                                    if (showFunding) {
+                                        const opacity = Math.min(Math.abs(displayVal) / 0.05, 1);
+                                        color = displayVal > 0 ? `rgba(16, 185, 129, ${0.2 + opacity * 0.8})` : `rgba(239, 68, 68, ${0.2 + opacity * 0.8})`;
+                                    } else {
+                                        const opacity = Math.min(displayVal / 100000, 1);
+                                        color = `rgba(245, 158, 11, ${0.2 + opacity * 0.8})`;
+                                    }
+                                }
                                 return (
                                     <div 
                                         key={ex} 
-                                        title={`${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}${markPrice ? ' | '+formatPrice(Number(markPrice)) : ''}`}
+                                        title={showFunding
+                                            ? `${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}${markPrice ? ' | '+formatPrice(Number(markPrice)) : ''}`
+                                            : `${ex.toUpperCase()}: ${markPrice !== undefined ? formatPrice(Number(markPrice)) : 'N/A'}`
+                                        }
                                         className="h-8 rounded-sm relative group/cell cursor-pointer"
                                         style={{ backgroundColor: color }}
                                         onClick={() => rate !== undefined && setSelectedPair({exchange: ex, symbol: row.symbol})}
                                     >
                                         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/cell:opacity-100 transition-opacity">
-                                            <span className="text-[6px] font-black text-white uppercase">{ex.substring(0,3)}</span>
+                                            <span className="text-[6px] font-black text-white uppercase opacity-80">{showFunding ? ex.substring(0,3) : (markPrice ? '$'+Number(markPrice).toLocaleString(undefined,{maximumFractionDigits:0}) : '--')}</span>
                                         </div>
                                     </div>
                                 );
                             })}
                         </div>
                         <div className="mt-3 pt-3 border-t border-gray-900/50 flex justify-between items-center">
-                             <div className="text-[8px] font-bold text-gray-600 uppercase">Spread APR</div>
-                             <div className="text-[10px] font-black text-purple-500">{row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--'}</div>
+                             <div className="text-[8px] font-bold text-gray-600 uppercase">{dataMode === 'price' ? 'Price Gap' : 'Spread APR'}</div>
+                             <div className="text-[10px] font-black text-purple-500">{dataMode === 'price' ? (row.priceSpread > 0 ? formatPrice(row.priceSpread) : '--') : (row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--')}</div>
                         </div>
                     </div>
                 ))}
@@ -715,28 +785,56 @@ function App() {
                         </div>
                         
                         <div className="bg-[#040404] rounded-[32px] p-8 border border-gray-900 shadow-inner min-h-[500px] flex items-center justify-center relative">
-                            {loadingMulti ? (
-                                <LoadingSpinner label="Synthesizing Global Market Data..." />
-                            ) : multiHistory ? (
+                            {loadingMulti && Object.keys(multiHistory || {}).length === 0 ? (
+                                <div className="flex flex-col items-center gap-4">
+                                    <LoadingSpinner label="Fetching exchange history data..." />
+                                    <div className="flex flex-wrap justify-center gap-2 mt-2">
+                                        {ALL_EXCHANGES.map(ex => (
+                                            <div key={ex} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-800 bg-[#111]">
+                                                <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
+                                                <span className="text-[8px] font-bold text-gray-500 uppercase">{ex}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : multiHistory && Object.keys(multiHistory).length > 0 ? (
                                 <TVChart data={multiHistory} isCompare={true} visibleExchanges={visibleExchanges} />
-                            ) : (
-                                <div className="text-gray-800 font-black uppercase text-[10px] tracking-widest">Unable to aggregate market history</div>
-                            )}
+                            ) : !loadingMulti ? (
+                                <div className="text-gray-800 font-black uppercase text-[10px] tracking-widest">No historical data available</div>
+                            ) : null}
                         </div>
 
                         <div className="mt-8 flex flex-wrap justify-center gap-4">
-                            {multiHistory && Object.keys(multiHistory).map(ex => {
+                            {ALL_EXCHANGES.map(ex => {
                                 const isVisible = visibleExchanges.includes(ex);
+                                const hasData = multiHistory && (multiHistory[ex]?.length > 0);
+                                const exStatus = historyStatus[ex];
+                                const isLoading = loadingMulti && !hasData && exStatus !== 'empty';
+                                const isFailed = exStatus === 'empty' || (multiHistory && !multiHistory[ex]);
+
                                 return (
                                     <button 
                                         key={ex} 
-                                        onClick={() => toggleExchangeVisibility(ex)}
+                                        onClick={() => hasData && toggleExchangeVisibility(ex)}
                                         className={`flex items-center gap-3 px-4 py-2 rounded-2xl border transition-all ${isVisible ? 'bg-white/[0.03] border-gray-800 opacity-100 shadow-lg' : 'border-transparent opacity-20 grayscale'}`}
+                                        title={isFailed ? 'No data available' : isLoading ? 'Loading...' : hasData ? `${(multiHistory[ex]?.length || 0)} data points` : ''}
                                     >
-                                        <div className="w-4 h-4 rounded-full flex items-center justify-center" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}>
-                                            {isVisible ? <Eye size={8} className="text-black" /> : <EyeOff size={8} className="text-black" />}
+                                        <div className="relative w-4 h-4 rounded-full flex items-center justify-center" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}>
+                                            {isLoading ? (
+                                                <div className="w-2 h-2 rounded-full bg-white/30 animate-ping" />
+                                            ) : isFailed ? (
+                                                <X size={8} className="text-black" />
+                                            ) : isVisible ? (
+                                                <Eye size={8} className="text-black" />
+                                            ) : (
+                                                <EyeOff size={8} className="text-black" />
+                                            )}
                                         </div>
-                                        <span className="text-[11px] font-black uppercase tracking-widest" style={{ color: isVisible ? '#fff' : '#888' }}>{ex}</span>
+                                        <span className="text-[11px] font-black uppercase tracking-widest flex items-center gap-1.5" style={{ color: isVisible ? '#fff' : '#888' }}>
+                                            {ex}
+                                            {isLoading && <span className="w-1 h-1 rounded-full bg-yellow-500 animate-pulse" />}
+                                            {hasData && <span className="text-[7px] text-green-600 font-bold">✓</span>}
+                                        </span>
                                     </button>
                                 );
                             })}

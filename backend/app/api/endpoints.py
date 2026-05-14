@@ -140,7 +140,11 @@ async def fetch_coinw_history(symbol: str, days: int):
 
 @router.get("/rates/history_all/{symbol}")
 async def get_aggregated_history(symbol: str, days: int = 7):
-    """聚合查詢：並發向所有交易所請求該幣種的歷史，不再依賴本地資料庫。加入 Redis 快取。"""
+    """聚合查詢：並發向所有交易所請求該幣種的歷史，不再依賴本地資料庫。加入 Redis 快取。
+    
+    Returns per-exchange data with status: {"data": {...}, "status": {"binance": "ok", ...}}
+    Each exchange has a 15s timeout. Results returned as soon as all complete or timeout.
+    """
     cache_key = f"history_all:{symbol}:{days}"
     try:
         from backend.app.main import redis
@@ -152,25 +156,40 @@ async def get_aggregated_history(symbol: str, days: int = 7):
         logger.error(f"Redis Read Error (history_all): {e}")
 
     active_exchanges = [ex for ex in collector.exchanges.keys()]
-    
-    tasks = []
-    for ex in active_exchanges:
-        tasks.append(get_historical_rates(ex, symbol, days))
-    
-    all_res = await asyncio.gather(*tasks)
-    
+
+    async def fetch_with_name(exchange: str) -> tuple[str, list]:
+        try:
+            data = await asyncio.wait_for(
+                get_historical_rates(exchange, symbol, days),
+                timeout=15
+            )
+            return exchange, data
+        except asyncio.TimeoutError:
+            logger.warning(f"History timeout: {exchange}/{symbol}")
+            return exchange, []
+        except Exception as e:
+            logger.error(f"History failed: {exchange}/{symbol}: {e}")
+            return exchange, []
+
+    tasks = [fetch_with_name(ex) for ex in active_exchanges]
+    results = await asyncio.gather(*tasks)
+
     result = {}
-    for ex, history in zip(active_exchanges, all_res):
+    status: dict[str, str] = {}
+    for ex, history in results:
+        status[ex] = "ok" if history else "empty"
         if history:
             result[ex] = [{"time": int(datetime.fromisoformat(h['timestamp']).timestamp()), "value": h['rate']} for h in history]
-    
+
+    response = {"data": result, "status": status}
+
     try:
         if redis and result:
-            await redis.setex(cache_key, 900, json.dumps(result)) # 15 分鐘快取
+            await redis.setex(cache_key, 900, json.dumps(response))
     except Exception as e:
         logger.error(f"Redis Write Error (history_all): {e}")
-            
-    return result
+
+    return response
 
 @router.get("/rates/history/{exchange}/{symbol}")
 async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
@@ -193,22 +212,47 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
         except: pass
         return res
 
-    if exchange.lower() == "aden":
+    if exchange.lower() == "asterdex":
+        try:
+            match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+            if not match:
+                return []
+            raw_sym = match.group(1).upper() + match.group(2).upper()
+            url = f"https://fapi.asterdex.com/fapi/v3/fundingRate?symbol={raw_sym}&limit=500"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list):
+                            res = [{
+                                "timestamp": datetime.fromtimestamp(d['fundingTime'] / 1000).isoformat(),
+                                "rate": float(d['fundingRate'])
+                            } for d in data if d.get('fundingRate') is not None]
+                            res.sort(key=lambda x: x['timestamp'])
+                            if redis and res:
+                                await redis.setex(cache_key, 900, json.dumps(res))
+                            return res
+        except Exception as e:
+            logger.error(f"AsterDEX history failed: {e}")
         return []
-    
+
+    if exchange.lower() in ("aden", "lighter"):
+        return []
+
     try:
         ex_id = exchange.lower()
         if ex_id == 'gate': ex_id = 'gateio'
-        
+        if ex_id == 'hyperliquid': ex_id = 'hyperliquid'
+
         if hasattr(ccxt_async, ex_id):
             ex_class = getattr(ccxt_async, ex_id)
             ex = ex_class({'options': {'defaultType': 'swap'}, 'timeout': 15000})
             try:
                 match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
                 base, quote = (match.group(1).upper(), match.group(2).upper()) if match else (symbol.upper(), 'USDT')
-                
+
                 await ex.load_markets()
-                
+
                 possible_syms = []
                 if ex_id == 'okx':
                     possible_syms = [f"{base}-{quote}-SWAP", f"{base}/{quote}:{quote}"]
@@ -216,6 +260,8 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                     possible_syms = [f"{base}/{quote}:{quote}", f"{base}{quote}"]
                 elif ex_id == 'mexc':
                     possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}_{quote}"]
+                elif ex_id == 'hyperliquid':
+                    possible_syms = [f"{base}/{quote}:{quote}"]
                 else:
                     possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}{quote}"]
 
@@ -224,7 +270,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                     if s in ex.markets:
                         ccxt_sym = s
                         break
-                
+
                 if not ccxt_sym:
                     for s, m in ex.markets.items():
                         if m.get('swap') and m.get('base') == base and (m.get('quote') == quote or m.get('settle') == quote):
@@ -235,28 +281,28 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                     since = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
                     limit = 1000
                     hist = await ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=limit)
-                    
+
                     api_data = []
                     for h in hist:
                         if h.get('fundingRate') is not None:
                             api_data.append({
-                                "timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(), 
+                                "timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(),
                                 "rate": float(h['fundingRate'])
                             })
-                    
+
                     if api_data:
                         res = sorted(api_data, key=lambda x: x['timestamp'])
                         try:
                             if redis: await redis.setex(cache_key, 900, json.dumps(res))
                         except: pass
                         return res
-                
+
                 logger.warning(f"History Fetch: {ex_id} ({symbol}) -> CCXT Sym: {ccxt_sym} | Found: {ccxt_sym in ex.markets if ccxt_sym else False}")
             finally:
                 await ex.close()
     except Exception as e:
         logger.error(f"History API fetch failed for {exchange} ({symbol}): {e}")
-            
+
     return []
 
 @router.get("/analysis/spreads")

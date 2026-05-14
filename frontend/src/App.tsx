@@ -179,6 +179,17 @@ function App() {
     } catch (e) { return isoStr; }
   };
 
+  const formatPrice = (price: number) => {
+    const abs = Math.abs(price);
+    let decimals: number;
+    if (abs >= 10000) decimals = 2;
+    else if (abs >= 100) decimals = 4;
+    else if (abs >= 1) decimals = 6;
+    else if (abs >= 0.01) decimals = 8;
+    else decimals = 10;
+    return '$' + price.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  };
+
   const connectWebSocket = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/ws`;
@@ -598,7 +609,7 @@ function App() {
                                                 <span className={`font-mono text-[11px] font-bold ${rate !== undefined ? 'text-white' : 'text-gray-800/50'}`}>{rate !== undefined ? `${(rate * 100).toFixed(4)}%` : '--'}</span>
                                                 {rate !== undefined && (
                                                     <>
-                                                        <span className="text-[8px] font-mono text-white/60 mt-0.5">{markPrice ? '$' + Number(markPrice).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : ''}</span>
+                                                        <span className="text-[8px] font-mono text-white/60 mt-0.5">{markPrice ? formatPrice(Number(markPrice)) : ''}</span>
                                                         <span className="text-[8px] font-black opacity-40 text-white uppercase mt-0.5">{interval}H</span>
                                                     </>
                                                 )}
@@ -649,7 +660,7 @@ function App() {
                                 return (
                                     <div 
                                         key={ex} 
-                                        title={`${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}${markPrice ? ' | $'+Number(markPrice).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : ''}`}
+                                        title={`${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}${markPrice ? ' | '+formatPrice(Number(markPrice)) : ''}`}
                                         className="h-8 rounded-sm relative group/cell cursor-pointer"
                                         style={{ backgroundColor: color }}
                                         onClick={() => rate !== undefined && setSelectedPair({exchange: ex, symbol: row.symbol})}

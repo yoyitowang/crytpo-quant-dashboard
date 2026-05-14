@@ -118,7 +118,8 @@ class DataCollector:
             "kucoin": self._kucoin_handler,
             "coinw": self._coinw_handler, 
             "mexc": self._mexc_handler,
-            "bingx": self._bingx_handler
+            "bingx": self._bingx_handler,
+            "aden": self._aden_handler
         }
         self.callbacks: List[Callable] = []
         self.latest_rates: Dict[str, Dict[str, Any]] = {}
@@ -137,15 +138,19 @@ class DataCollector:
                 settle_time = item.get('settlement_time')
                 if settle_time and isinstance(settle_time, datetime):
                     if settle_time < now:
+                        exch = item.get('exchange', '?')
+                        sym = item.get('symbol', '?')
+                        logger.warning(f"Settlement expired: {exch} {sym}, settle={settle_time}")
                         continue
                 
-                # Dynamic Interval Injection
                 exch = item['exchange']
                 sym = item['symbol']
                 item['interval'] = item.get('interval') or interval_manager.get(exch, sym)
                 fresh_items.append(item)
             
             if not fresh_items:
+                if isinstance(data, list) and len(items) > 0:
+                    logger.warning(f"All {len(items)} items filtered out in notify_callbacks")
                 return
 
             msg = fresh_items if isinstance(data, list) else fresh_items[0]
@@ -164,20 +169,26 @@ class DataCollector:
                 data = await self.queue.get()
                 items = data if isinstance(data, list) else [data]
                 for item in items:
-                    exch = str(item['exchange']).lower().strip()
-                    raw_sym = str(item['symbol']).upper()
-                    clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', raw_sym)
-                    key = f"latest:{exch}:{clean_sym}"
-                    item['exchange'] = exch
-                    item['symbol'] = clean_sym
-                    self.latest_rates[key] = item
-                    for callback in self.callbacks:
-                        try:
-                            if asyncio.iscoroutinefunction(callback): asyncio.create_task(callback(item))
-                            else: callback(item)
-                        except: pass
+                    try:
+                        exch = str(item['exchange']).lower().strip()
+                        raw_sym = str(item['symbol']).upper()
+                        clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', raw_sym)
+                        key = f"latest:{exch}:{clean_sym}"
+                        item['exchange'] = exch
+                        item['symbol'] = clean_sym
+                        self.latest_rates[key] = item
+                        for callback in self.callbacks:
+                            try:
+                                if asyncio.iscoroutinefunction(callback): asyncio.create_task(callback(item))
+                                else: callback(item)
+                            except Exception as cb_err:
+                                logger.error(f"Callback error for {key}: {cb_err}")
+                    except Exception as item_err:
+                        logger.error(f"Worker item processing error: {item_err} | item keys={list(item.keys()) if isinstance(item, dict) else type(item)}")
                 self.queue.task_done()
-            except Exception: pass
+            except Exception as e:
+                logger.error(f"Worker fatal error: {e}")
+                await asyncio.sleep(1)
 
     async def start(self):
         await interval_manager.refresh()
@@ -219,8 +230,10 @@ class DataCollector:
                             "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000), "timestamp": datetime.utcnow()
                         } for item in data if item.get('symbol') in trading_syms]
                         await self._notify_callbacks(batch)
-                    await asyncio.sleep(60)
-                except: await asyncio.sleep(10)
+                    await asyncio.sleep(30)
+                except Exception as e:
+                    logger.error(f"Binance Handler Failed: {e}")
+                    await asyncio.sleep(10)
 
     async def _coinw_handler(self):
         # --- 核心：探測與輪詢輔助 ---
@@ -424,7 +437,7 @@ class DataCollector:
                                         "settlement_time": datetime.fromtimestamp(item['nextFundingRateDateTime'] / 1000) if item.get('nextFundingRateDateTime') else None, 
                                         "timestamp": datetime.utcnow()
                                     })
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
                 except: await asyncio.sleep(10)
 
     async def _mexc_handler(self):
@@ -460,7 +473,7 @@ class DataCollector:
                                         "interval": int(item.get('collectCycle', 8)),
                                         "timestamp": datetime.utcnow()
                                     })
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
                 except: await asyncio.sleep(15)
 
     async def _bingx_handler(self):
@@ -484,7 +497,7 @@ class DataCollector:
                                         "interval": int(item.get('fundingIntervalHours', 8)),
                                         "timestamp": datetime.utcnow()
                                     })
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
                 except: await asyncio.sleep(15)
 
     async def _bitget_handler(self):
@@ -577,5 +590,59 @@ class DataCollector:
                             "mark_price": float(item['mark_price']) if item.get('mark_price') else None,
                             "settlement_time": None, "timestamp": datetime.utcnow()
                         })
+
+    async def _aden_handler(self):
+        """
+        Aden DEX aggregator — uses api.aden.io (NOT perp-api.aden.io).
+        Endpoint: GET /api/v1/dex_futures/usdt/contracts → returns ALL 634+ perpetual pairs
+        with per-contract funding_rate, mark_price, funding_interval (seconds),
+        funding_next_apply (unix ts), and status.
+        Symbol format: DRIFT_USDT → worker normalizes to DRIFTUSDT.
+        """
+        url = "https://api.aden.io/api/v1/dex_futures/usdt/contracts"
+        inventory_logged = False
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try:
+                    async with session.get(url, timeout=15) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if not inventory_logged:
+                                names = sorted([x['name'] for x in data if x.get('name')])
+                                logger.info(f"Aden Inventory ({len(names)} contracts via api.aden.io):")
+                                for n in names:
+                                    logger.info(f"  Aden: {n}")
+                                inventory_logged = True
+
+                            batch = []
+                            for item in data:
+                                name = item.get('name', '')
+                                if not name or item.get('status') != 'trading':
+                                    continue
+                                rate = item.get('funding_rate')
+                                if rate is None:
+                                    logger.warning(f"Aden {name}: missing funding_rate, skipping")
+                                    continue
+                                mark_price = item.get('mark_price')
+                                interval = int(item.get('funding_interval', 28800)) // 3600
+                                settle_ts = item.get('funding_next_apply')
+                                settle_time = datetime.fromtimestamp(settle_ts) if settle_ts else None
+                                batch.append({
+                                    "exchange": "aden",
+                                    "symbol": name,
+                                    "rate": float(rate),
+                                    "mark_price": float(mark_price) if mark_price else None,
+                                    "settlement_time": settle_time,
+                                    "interval": interval,
+                                    "timestamp": datetime.utcnow()
+                                })
+                            if batch:
+                                await self._notify_callbacks(batch)
+                            else:
+                                logger.warning("Aden: empty batch after processing")
+                    await asyncio.sleep(30)
+                except Exception as e:
+                    logger.error(f"Aden Handler Failed: {e}")
+                    await asyncio.sleep(15)
 
 collector = DataCollector()

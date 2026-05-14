@@ -166,7 +166,7 @@ async def get_aggregated_history(symbol: str, days: int = 7):
     
     try:
         if redis and result:
-            await redis.setex(cache_key, 180, json.dumps(result)) # 3 分鐘快取
+            await redis.setex(cache_key, 900, json.dumps(result)) # 15 分鐘快取
     except Exception as e:
         logger.error(f"Redis Write Error (history_all): {e}")
             
@@ -189,9 +189,12 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
         res = await fetch_coinw_history(symbol, days)
         try:
             if redis and res:
-                await redis.setex(cache_key, 180, json.dumps(res))
+                await redis.setex(cache_key, 900, json.dumps(res))
         except: pass
         return res
+
+    if exchange.lower() == "aden":
+        return []
     
     try:
         ex_id = exchange.lower()
@@ -199,23 +202,19 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
         
         if hasattr(ccxt_async, ex_id):
             ex_class = getattr(ccxt_async, ex_id)
-            # 強制使用 swap/futures 模式以確保獲取正確的歷史數據
             ex = ex_class({'options': {'defaultType': 'swap'}, 'timeout': 15000})
             try:
-                # 符號正規化邏輯
                 match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
                 base, quote = (match.group(1).upper(), match.group(2).upper()) if match else (symbol.upper(), 'USDT')
                 
                 await ex.load_markets()
                 
-                # 建立優先級符號列表
                 possible_syms = []
                 if ex_id == 'okx':
                     possible_syms = [f"{base}-{quote}-SWAP", f"{base}/{quote}:{quote}"]
                 elif ex_id == 'binance':
                     possible_syms = [f"{base}/{quote}:{quote}", f"{base}{quote}"]
                 elif ex_id == 'mexc':
-                    # MEXC CCXT 符號格式較特殊
                     possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}_{quote}"]
                 else:
                     possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}{quote}"]
@@ -227,7 +226,6 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                         break
                 
                 if not ccxt_sym:
-                    # 暴力搜尋：尋找符合 base/quote 且為 swap 的合約
                     for s, m in ex.markets.items():
                         if m.get('swap') and m.get('base') == base and (m.get('quote') == quote or m.get('settle') == quote):
                             ccxt_sym = s
@@ -235,8 +233,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
 
                 if ccxt_sym and ex.has.get('fetchFundingRateHistory'):
                     since = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
-                    # 增加 limit 以獲取完整數據
-                    limit = 1000 if days > 7 else 200
+                    limit = 1000
                     hist = await ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=limit)
                     
                     api_data = []
@@ -250,7 +247,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                     if api_data:
                         res = sorted(api_data, key=lambda x: x['timestamp'])
                         try:
-                            if redis: await redis.setex(cache_key, 180, json.dumps(res))
+                            if redis: await redis.setex(cache_key, 900, json.dumps(res))
                         except: pass
                         return res
                 

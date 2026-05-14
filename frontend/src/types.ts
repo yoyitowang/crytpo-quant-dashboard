@@ -30,7 +30,7 @@ export interface AlertEvent {
 
 export const EXCHANGE_COLORS: Record<string, string> = {
   binance: '#F3BA2F', okx: '#FFFFFF', bybit: '#FFB11A', bitget: '#00F0FF',
-  gate: '#E02A44', kucoin: '#24AE8F', coinw: '#3B82F6', mexc: '#0081FF', bingx: '#3182CE',
+  gate: '#E02A44', kucoin: '#24AE8F', coinw: '#3B82F6', mexc: '#0081FF', bingx: '#3182CE', aden: '#6366F1',
 }
 
-export const ALL_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'gate', 'kucoin', 'coinw', 'mexc', 'bingx']
+export const ALL_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'gate', 'kucoin', 'coinw', 'mexc', 'bingx', 'aden']

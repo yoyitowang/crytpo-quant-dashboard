@@ -20,17 +20,30 @@ logger = logging.getLogger(__name__)
 redis: aioredis.Redis = None
 local_rate_cache = {}
 
-_db_write_queue = asyncio.Queue(maxsize=50000)
-_db_write_batch_size = 50
+_db_write_queue: asyncio.Queue = None
+_db_enabled = False
+
 
 async def _db_writer():
-    """Background task: batch-writes funding rate data to PostgreSQL.
-    Collects items from queue and flushes in batches every 2 seconds."""
+    """Background task: batch-writes funding rate data to PostgreSQL."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
-    while True:
+    global _db_write_queue, _db_enabled
+    _db_write_queue = asyncio.Queue(maxsize=50000)
+
+    # Initialize DB: create tables if possible
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        _db_enabled = True
+        logger.info("PostgreSQL initialized for history storage")
+    except Exception as e:
+        logger.warning(f"PostgreSQL unavailable, history will not be stored locally: {e}")
+        return  # DB writer exits silently — app continues without DB
+
+    while _db_enabled:
         batch = []
         try:
-            while len(batch) < _db_write_batch_size:
+            while len(batch) < 50:
                 try:
                     item = await asyncio.wait_for(_db_write_queue.get(), timeout=2)
                     batch.append(item)
@@ -44,6 +57,7 @@ async def _db_writer():
                     await session.commit()
         except Exception as e:
             logger.error(f"DB write error: {e}")
+
 
 async def db_callback(data):
     """Redis + PostgreSQL 寫入"""
@@ -78,22 +92,22 @@ async def db_callback(data):
     if mset_data:
         await redis.mset(mset_data)
 
-    for row in db_rows:
-        try:
-            _db_write_queue.put_nowait(row)
-        except asyncio.QueueFull:
-            break  # drop if queue full (don't block the hot path)
+    if _db_write_queue is not None:
+        for row in db_rows:
+            try:
+                _db_write_queue.put_nowait(row)
+            except asyncio.QueueFull:
+                break
+
 
 async def ws_callback(data):
     await ws_manager.broadcast(data)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global redis
     redis = aioredis.from_url(f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}", decode_responses=True)
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
     asyncio.create_task(_db_writer())
     collector.register_callback(db_callback)

@@ -1,22 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff } from 'lucide-react';
+import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff, Bell } from 'lucide-react';
 import { createChart, ColorType, IChartApi } from 'lightweight-charts';
-
-interface FundingRate {
-  exchange: string;
-  symbol: string;
-  rate: number;
-  interval?: number;
-  settlement_time?: string;
-  timestamp: string;
-}
-
-const EXCHANGE_COLORS: Record<string, string> = {
-    'binance': '#F3BA2F', 'okx': '#FFFFFF', 'bybit': '#FFB11A', 'bitget': '#00F0FF',
-    'gate': '#E02A44', 'kucoin': '#24AE8F', 'coinw': '#3B82F6', 'mexc': '#0081FF', 'bingx': '#3182CE'
-};
-
-const ALL_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'gate', 'kucoin', 'coinw', 'mexc', 'bingx'];
+import type { FundingRate } from './types';
+import { EXCHANGE_COLORS, ALL_EXCHANGES } from './types';
+import { useAlerts } from './hooks/useAlerts';
+import { AlertPanel } from './components/AlertPanel';
+import { ToastContainer } from './components/ToastContainer';
 
 // --- TradingView 專業圖表組件 (支援動態隱藏) ---
 const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: { data: any, isCompare?: boolean, visibleExchanges?: string[] }) => {
@@ -116,6 +105,8 @@ function App() {
   const [rates, setRates] = useState<Record<string, FundingRate>>({});
   const [summary, setSummary] = useState<any>(null);
   const [health, setHealth] = useState<any>(null);
+  const [isAlertPanelOpen, setIsAlertPanelOpen] = useState(false);
+  const { rules, events, activeToastIds, soundEnabled, addRule, removeRule, toggleRule, toggleSound, dismissToast, checkAlerts } = useAlerts();
   const [history, setHistory] = useState<any[]>([]);
   const [multiHistory, setMultiHistory] = useState<any>(null);
   const [selectedPair, setSelectedPair] = useState<{exchange: string, symbol: string} | null>(null);
@@ -242,9 +233,11 @@ function App() {
           const data = await res.json();
           if (Array.isArray(data)) {
             const initialRates: Record<string, FundingRate> = {};
-            data.forEach(([sym, ex, rate, interval]) => {
+            data.forEach(([sym, ex, rate, interval, markPrice]) => {
               initialRates[`${ex}:${sym}`] = {
-                symbol: sym, exchange: ex, rate, interval, timestamp: new Date().toISOString()
+                symbol: sym, exchange: ex, rate, interval,
+                mark_price: markPrice ?? undefined,
+                timestamp: new Date().toISOString()
               };
             });
             setRates(prev => ({...prev, ...initialRates}));
@@ -260,6 +253,10 @@ function App() {
     const interval = setInterval(fetchData, 30000); // 延長 API 輪詢間隔，主要靠 WS 更新
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    checkAlerts(rates);
+  }, [rates, checkAlerts]);
 
   useEffect(() => {
     if (selectedPair) {
@@ -308,10 +305,10 @@ function App() {
   }, [compareSymbol, timeframe]); // 移除了 historyCache 依賴
 
   const filteredData = useMemo(() => {
-    const symbolsMap: Record<string, Record<string, {rate: number, interval: number}>> = {};
+    const symbolsMap: Record<string, Record<string, {rate: number, interval: number, markPrice?: number}>> = {};
     Object.values(rates).forEach(r => {
         if (!symbolsMap[r.symbol]) symbolsMap[r.symbol] = {};
-        symbolsMap[r.symbol][r.exchange] = { rate: r.rate, interval: r.interval || 8 };
+        symbolsMap[r.symbol][r.exchange] = { rate: r.rate, interval: r.interval || 8, markPrice: r.mark_price };
     });
 
     let result = Object.keys(symbolsMap).map(sym => {
@@ -329,6 +326,7 @@ function App() {
             symbol: sym, 
             rates: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.rate])), 
             intervals: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.interval])),
+            markPrices: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.markPrice])),
             maxApr: maxAprMagnitude * 100,
             spread: spread * 100, 
             base: sym.replace(/USDT|USDC/i, ''), 
@@ -389,6 +387,10 @@ function App() {
                 <div className="text-[10px] font-black uppercase tracking-tighter"><span className="text-gray-600">Last Sync:</span> <span className="text-blue-500">{formatLocalTime(health?.last_update)}</span></div>
                 <div className="flex items-center gap-2 mt-0.5"><div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} /><span className="text-[9px] font-bold text-gray-700 uppercase">Engine: {connected ? 'Online' : 'Offline'}</span></div>
             </div>
+            <button onClick={() => setIsAlertPanelOpen(true)} className="relative p-2 rounded-xl border border-gray-800 hover:border-yellow-600/50 hover:text-yellow-500 text-gray-500 transition-all">
+              <Bell size={16} />
+              {rules.some(r => r.enabled) && <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />}
+            </button>
             <input type="text" placeholder="SEARCH ASSET..." className="bg-[#111] border border-gray-800 rounded-full px-6 py-1.5 text-xs focus:outline-none focus:border-blue-900 w-48 font-bold uppercase" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
       </nav>
@@ -578,14 +580,28 @@ function App() {
                                 {selectedExchanges.map(ex => {
                                     const rate = row.rates[ex];
                                     const interval = row.intervals[ex];
+                                    const markPrice = row.markPrices?.[ex];
                                     const val = (rate || 0) * 100;
                                     const opacity = Math.min(Math.abs(val) / 0.05, 1);
                                     const style = rate === undefined ? { backgroundColor: 'transparent' } : { backgroundColor: val > 0 ? `rgba(16, 185, 129, ${0.1 + opacity * 0.7})` : `rgba(239, 68, 68, ${0.1 + opacity * 0.7})` };
+
+                                    let healthColor = '#22c55e';
+                                    if (rate !== undefined) {
+                                        const redFlags = (Math.abs(rate) >= 0.01 ? 1 : 0) + (interval < 1 || interval > 24 ? 1 : 0) + (row.symbol.length < 3 ? 1 : 0);
+                                        healthColor = redFlags === 0 ? '#22c55e' : redFlags === 1 ? '#eab308' : '#ef4444';
+                                    }
+
                                     return (
                                         <td key={ex} className="p-0 border-l border-gray-900/20">
-                                            <div style={style} className="w-full h-16 flex flex-col items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20" onClick={() => { if (rate !== undefined) { setSelectedPair({exchange: ex, symbol: row.symbol}); setTimeframe(7); }}}>
+                                            <div style={style} className="w-full h-[76px] flex flex-col items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20 relative group/cell" onClick={() => { if (rate !== undefined) { setSelectedPair({exchange: ex, symbol: row.symbol}); setTimeframe(7); }}}>
+                                                {rate !== undefined && <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full" style={{ backgroundColor: healthColor }} title={healthColor === '#22c55e' ? 'Valid' : healthColor === '#eab308' ? 'Warning' : 'Suspicious'} />}
                                                 <span className={`font-mono text-[11px] font-bold ${rate !== undefined ? 'text-white' : 'text-gray-800/50'}`}>{rate !== undefined ? `${(rate * 100).toFixed(4)}%` : '--'}</span>
-                                                {rate !== undefined && <span className="text-[8px] font-black opacity-40 text-white uppercase mt-0.5">{interval}H</span>}
+                                                {rate !== undefined && (
+                                                    <>
+                                                        <span className="text-[8px] font-mono text-white/60 mt-0.5">{markPrice ? '$' + Number(markPrice).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : ''}</span>
+                                                        <span className="text-[8px] font-black opacity-40 text-white uppercase mt-0.5">{interval}H</span>
+                                                    </>
+                                                )}
                                             </div>
                                         </td>
                                     );
@@ -626,13 +642,14 @@ function App() {
                         <div className="grid grid-cols-3 gap-1">
                             {selectedExchanges.map(ex => {
                                 const rate = row.rates[ex];
+                                const markPrice = row.markPrices?.[ex];
                                 const val = (rate || 0) * 100;
                                 const opacity = Math.min(Math.abs(val) / 0.05, 1);
                                 const color = rate === undefined ? '#111' : (val > 0 ? `rgba(16, 185, 129, ${0.2 + opacity * 0.8})` : `rgba(239, 68, 68, ${0.2 + opacity * 0.8})`);
                                 return (
                                     <div 
                                         key={ex} 
-                                        title={`${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}`}
+                                        title={`${ex.toUpperCase()}: ${rate !== undefined ? (rate*100).toFixed(4)+'%' : 'N/A'}${markPrice ? ' | $'+Number(markPrice).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : ''}`}
                                         className="h-8 rounded-sm relative group/cell cursor-pointer"
                                         style={{ backgroundColor: color }}
                                         onClick={() => rate !== undefined && setSelectedPair({exchange: ex, symbol: row.symbol})}
@@ -718,6 +735,20 @@ function App() {
             </div>
         )}
       </main>
+
+      {isAlertPanelOpen && (
+        <AlertPanel
+          rules={rules}
+          events={events}
+          soundEnabled={soundEnabled}
+          onAddRule={addRule}
+          onRemoveRule={removeRule}
+          onToggleRule={toggleRule}
+          onToggleSound={toggleSound}
+          onClose={() => setIsAlertPanelOpen(false)}
+        />
+      )}
+      <ToastContainer events={events} activeToastIds={activeToastIds} onDismiss={dismissToast} />
     </div>
   );
 }

@@ -28,14 +28,15 @@ async def get_compressed_rates():
             rates_json = await redis.mget(batch_keys)
             all_data.extend([json.loads(r) for r in rates_json if r])
             
-        # 壓縮：只保留 symbol, exchange, rate, interval
+        # 壓縮：只保留 symbol, exchange, rate, interval, mark_price
         compressed = []
         for r in all_data:
             compressed.append([
                 r['symbol'],
                 r['exchange'],
                 round(r['rate'], 6),
-                r.get('interval', 8)
+                r.get('interval', 8),
+                r.get('mark_price')
             ])
         return compressed
     except Exception as e:

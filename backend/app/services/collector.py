@@ -215,6 +215,7 @@ class DataCollector:
                         data = await resp.json()
                         batch = [{
                             "exchange": "binance", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
+                            "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
                             "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000), "timestamp": datetime.utcnow()
                         } for item in data if item.get('symbol') in trading_syms]
                         await self._notify_callbacks(batch)
@@ -251,7 +252,6 @@ class DataCollector:
                 while True:
                     try:
                         for p in pairs:
-                            # 針對每個幣種請求最後結算率
                             url = f"{rest_base}/v1/perpum/fundingRate?instrument={p.lower()}"
                             async with session.get(url, timeout=5) as resp:
                                 res = await resp.json()
@@ -261,10 +261,10 @@ class DataCollector:
                                         "exchange": "coinw",
                                         "symbol": f"{p.upper()}USDT",
                                         "rate": float(item['value']),
-                                        "settlement_time": datetime.fromtimestamp(item['ts'] / 1000),
+                                        "settlement_time": None,
                                         "timestamp": datetime.utcnow()
                                     })
-                            await asyncio.sleep(0.15) # 遵守 8 req/s 限制
+                            await asyncio.sleep(0.15)
                         await asyncio.sleep(600)
                     except Exception as e:
                         logger.error(f"CoinW Polling Error: {e}")
@@ -279,20 +279,32 @@ class DataCollector:
 
         additional_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with websockets.connect(wss_url, additional_headers=additional_headers, ping_interval=15) as ws:
-            # 分批訂閱
+            # 分批訂閱 funding_rate + mark_price
             for i in range(0, len(pairs), 40):
                 batch = pairs[i:i+40]
                 for p in batch:
-                    sub_msg = {"event": "sub", "params": {"biz": "futures", "type": "funding_rate", "pairCode": p}}
-                    await ws.send(json.dumps(sub_msg))
+                    await ws.send(json.dumps({"event": "sub", "params": {"biz": "futures", "type": "funding_rate", "pairCode": p}}))
+                    await ws.send(json.dumps({"event": "sub", "params": {"biz": "futures", "type": "mark_price", "pairCode": p}}))
                 await asyncio.sleep(1)
             
+            mark_prices = {}
             while True:
                 msg = await ws.recv()
                 data = json.loads(msg)
-                if data.get("type") == "funding_rate" and "data" in data:
+                msg_type = data.get("type", "")
+                
+                if msg_type == "mark_price" and "data" in data:
+                    d = data["data"]
+                    if "p" in d:
+                        pair = data.get("pairCode", "").lower()
+                        try:
+                            mark_prices[pair] = float(d["p"])
+                        except: pass
+                
+                elif msg_type == "funding_rate" and "data" in data:
                     res = data["data"]
                     if "r" in res:
+                        pair = data.get("pairCode", "").lower()
                         # 過期過濾
                         next_settle_ms = res.get("nt")
                         if next_settle_ms:
@@ -304,6 +316,7 @@ class DataCollector:
                             "exchange": "coinw",
                             "symbol": f"{data.get('pairCode', '').upper()}USDT",
                             "rate": float(res["r"]),
+                            "mark_price": mark_prices.get(pair),
                             "settlement_time": next_settle_dt if next_settle_ms else None,
                             "timestamp": datetime.utcnow()
                         })
@@ -319,10 +332,24 @@ class DataCollector:
             for i in range(0, len(all_ids), 100):
                 batch = all_ids[i:i+100]
                 await ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "funding-rate", "instId": inst_id} for inst_id in batch]}))
+            for i in range(0, len(all_ids), 100):
+                batch = all_ids[i:i+100]
+                await ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "mark-price", "instId": inst_id} for inst_id in batch]}))
+
+            mark_prices = {}
             while True:
                 msg = await ws.recv()
                 data = json.loads(msg)
-                if "data" in data:
+                if "data" not in data:
+                    continue
+                channel = data.get("arg", {}).get("channel", "")
+
+                if channel == "mark-price":
+                    for item in data["data"]:
+                        try:
+                            mark_prices[item['instId']] = float(item.get('markPx', 0))
+                        except: pass
+                elif channel == "funding-rate":
                     for item in data["data"]:
                         interval = 8
                         if 'nextFundingTime' in item and 'fundingTime' in item:
@@ -332,6 +359,7 @@ class DataCollector:
                         await self._notify_callbacks({
                             "exchange": "okx", "symbol": item['instId'],
                             "rate": float(item['fundingRate']),
+                            "mark_price": mark_prices.get(item['instId']),
                             "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000),
                             "interval": interval,
                             "timestamp": datetime.utcnow()
@@ -354,6 +382,7 @@ class DataCollector:
                         if item['symbol'] in all_symbols and item.get('fundingRate'):
                             batch.append({
                                 "exchange": "bybit", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                                "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
                                 "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
                                 "timestamp": datetime.utcnow()
                             })
@@ -371,6 +400,7 @@ class DataCollector:
                     if "fundingRate" in item:
                         await self._notify_callbacks({
                             "exchange": "bybit", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                            "mark_price": float(item['markPrice']) if 'markPrice' in item and item['markPrice'] else None,
                             "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if 'nextFundingTime' in item else None,
                             "timestamp": datetime.utcnow()
                         })
@@ -384,11 +414,12 @@ class DataCollector:
                         res = await resp.json()
                         if res.get('data'):
                             for item in res['data']:
-                                # 僅處理 'Open' 狀態且包含 USDT
                                 if 'USDT' in item.get('symbol', '') and item.get('status') == 'Open':
+                                    sym = item['symbol'].replace('XBT', 'BTC')
                                     await self._notify_callbacks({
-                                        "exchange": "kucoin", "symbol": item['symbol'],
+                                        "exchange": "kucoin", "symbol": sym,
                                         "rate": float(item.get('fundingFeeRate') or 0),
+                                        "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
                                         "interval": int(item.get('fundingRateGranularity') or 28800000) // 3600000,
                                         "settlement_time": datetime.fromtimestamp(item['nextFundingRateDateTime'] / 1000) if item.get('nextFundingRateDateTime') else None, 
                                         "timestamp": datetime.utcnow()
@@ -398,9 +429,20 @@ class DataCollector:
 
     async def _mexc_handler(self):
         url = "https://contract.mexc.com/api/v1/contract/funding_rate"
+        ticker_url = "https://contract.mexc.com/api/v1/contract/ticker"
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
+                    # Fetch mark prices from ticker (MEXC uses 'fairPrice' as mark price)
+                    mark_prices = {}
+                    async with session.get(ticker_url, timeout=10) as t_resp:
+                        t_data = await t_resp.json()
+                        if t_data.get('success') and t_data.get('data'):
+                            for t in t_data['data']:
+                                price = t.get('fairPrice') or t.get('indexPrice')
+                                if price:
+                                    mark_prices[t['symbol']] = float(price)
+
                     # 獲取 MEXC 合約詳情以過濾狀態 (state 0 為正常交易)
                     async with session.get("https://contract.mexc.com/api/v1/contract/detail", timeout=10) as det_resp:
                         det_data = await det_resp.json()
@@ -413,6 +455,7 @@ class DataCollector:
                                 if item['symbol'] in trading_syms:
                                     await self._notify_callbacks({
                                         "exchange": "mexc", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                                        "mark_price": mark_prices.get(item['symbol']),
                                         "settlement_time": datetime.fromtimestamp(item['nextSettleTime'] / 1000) if item.get('nextSettleTime') else None,
                                         "interval": int(item.get('collectCycle', 8)),
                                         "timestamp": datetime.utcnow()
@@ -436,6 +479,7 @@ class DataCollector:
                                 if item['symbol'] in trading_syms and item['symbol'].endswith('USDT'):
                                     await self._notify_callbacks({
                                         "exchange": "bingx", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
+                                        "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
                                         "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000) if item.get('nextFundingTime') else None,
                                         "interval": int(item.get('fundingIntervalHours', 8)),
                                         "timestamp": datetime.utcnow()
@@ -458,8 +502,10 @@ class DataCollector:
                     batch = []
                     for item in d.get('data', []):
                         if item['symbol'] in all_symbols and item.get('fundingRate'):
+                            mp = item.get('markPrice') or item.get('markPr') or item.get('markPx')
                             batch.append({
                                 "exchange": "bitget", "symbol": item['symbol'], "rate": float(item['fundingRate']),
+                                "mark_price": float(mp) if mp else None,
                                 "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
                                 "timestamp": datetime.utcnow()
                             })
@@ -478,8 +524,10 @@ class DataCollector:
                 if "data" in data:
                     for item in data["data"]:
                         if "fundingRate" in item:
+                            mp = item.get('markPrice') or item.get('markPr') or item.get('markPx')
                             await self._notify_callbacks({
                                 "exchange": "bitget", "symbol": item['instId'], "rate": float(item['fundingRate']),
+                                "mark_price": float(mp) if mp else None,
                                 "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
                                 "timestamp": datetime.utcnow()
                             })
@@ -501,6 +549,7 @@ class DataCollector:
                         if item['contract'] in all_symbols and item.get('funding_rate'):
                             batch.append({
                                 "exchange": "gate", "symbol": item['contract'], "rate": float(item['funding_rate']),
+                                "mark_price": float(item['mark_price']) if item.get('mark_price') else None,
                                 "settlement_time": None, "timestamp": datetime.utcnow()
                             })
                     if batch: await self._notify_callbacks(batch)
@@ -525,6 +574,7 @@ class DataCollector:
                     for item in items:
                         await self._notify_callbacks({
                             "exchange": "gate", "symbol": item['contract'], "rate": float(item['funding_rate']),
+                            "mark_price": float(item['mark_price']) if item.get('mark_price') else None,
                             "settlement_time": None, "timestamp": datetime.utcnow()
                         })
 

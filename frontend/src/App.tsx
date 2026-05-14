@@ -109,7 +109,6 @@ function App() {
   const { rules, events, activeToastIds, soundEnabled, addRule, removeRule, toggleRule, toggleSound, dismissToast, checkAlerts } = useAlerts();
   const [history, setHistory] = useState<any[]>([]);
   const [multiHistory, setMultiHistory] = useState<any>(null);
-  const [historyStatus, setHistoryStatus] = useState<Record<string, string>>({});
   const [selectedPair, setSelectedPair] = useState<{exchange: string, symbol: string} | null>(null);
   const [compareSymbol, setCompareSymbol] = useState<string | null>(null);
   const [timeframe, setTimeframe] = useState<number>(7);
@@ -300,26 +299,22 @@ function App() {
         if (historyCache[cacheKey]) {
             const cached = historyCache[cacheKey];
             setMultiHistory(cached.data || cached);
-            setHistoryStatus(cached.status || {});
             setLoadingMulti(false);
             return;
         }
 
         setMultiHistory({});
-        setHistoryStatus({});
         setLoadingMulti(true);
         fetch(`/api/rates/history_all/${compareSymbol}?days=${timeframe}`)
             .then(res => res.json())
             .then(data => {
                 const hist = data.data || data;
                 setMultiHistory(hist);
-                setHistoryStatus(data.status || {});
                 setHistoryCache(prev => ({ ...prev, [cacheKey]: data }));
                 setLoadingMulti(false);
             })
             .catch(() => {
                 setLoadingMulti(false);
-                setHistoryStatus(prev => ({ ...prev, _error: 'fetch_failed' }));
             });
         setVisibleExchanges(ALL_EXCHANGES); 
     } else { setMultiHistory(null); }
@@ -788,14 +783,6 @@ function App() {
                             {loadingMulti && Object.keys(multiHistory || {}).length === 0 ? (
                                 <div className="flex flex-col items-center gap-4">
                                     <LoadingSpinner label="Fetching exchange history data..." />
-                                    <div className="flex flex-wrap justify-center gap-2 mt-2">
-                                        {ALL_EXCHANGES.map(ex => (
-                                            <div key={ex} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-800 bg-[#111]">
-                                                <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
-                                                <span className="text-[8px] font-bold text-gray-500 uppercase">{ex}</span>
-                                            </div>
-                                        ))}
-                                    </div>
                                 </div>
                             ) : multiHistory && Object.keys(multiHistory).length > 0 ? (
                                 <TVChart data={multiHistory} isCompare={true} visibleExchanges={visibleExchanges} />
@@ -805,39 +792,30 @@ function App() {
                         </div>
 
                         <div className="mt-8 flex flex-wrap justify-center gap-4">
-                            {ALL_EXCHANGES.map(ex => {
-                                const isVisible = visibleExchanges.includes(ex);
-                                const hasData = multiHistory && (multiHistory[ex]?.length > 0);
-                                const exStatus = historyStatus[ex];
-                                const isLoading = loadingMulti && !hasData && exStatus !== 'empty';
-                                const isFailed = exStatus === 'empty' || (multiHistory && !multiHistory[ex]);
-
-                                return (
-                                    <button 
-                                        key={ex} 
-                                        onClick={() => hasData && toggleExchangeVisibility(ex)}
-                                        className={`flex items-center gap-3 px-4 py-2 rounded-2xl border transition-all ${isVisible ? 'bg-white/[0.03] border-gray-800 opacity-100 shadow-lg' : 'border-transparent opacity-20 grayscale'}`}
-                                        title={isFailed ? 'No data available' : isLoading ? 'Loading...' : hasData ? `${(multiHistory[ex]?.length || 0)} data points` : ''}
-                                    >
-                                        <div className="relative w-4 h-4 rounded-full flex items-center justify-center" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}>
-                                            {isLoading ? (
-                                                <div className="w-2 h-2 rounded-full bg-white/30 animate-ping" />
-                                            ) : isFailed ? (
-                                                <X size={8} className="text-black" />
-                                            ) : isVisible ? (
-                                                <Eye size={8} className="text-black" />
-                                            ) : (
-                                                <EyeOff size={8} className="text-black" />
-                                            )}
-                                        </div>
-                                        <span className="text-[11px] font-black uppercase tracking-widest flex items-center gap-1.5" style={{ color: isVisible ? '#fff' : '#888' }}>
-                                            {ex}
-                                            {isLoading && <span className="w-1 h-1 rounded-full bg-yellow-500 animate-pulse" />}
-                                            {hasData && <span className="text-[7px] text-green-600 font-bold">✓</span>}
-                                        </span>
-                                    </button>
-                                );
-                            })}
+                            {multiHistory && Object.keys(multiHistory).length > 0 ? (
+                                Object.keys(multiHistory).map(ex => {
+                                    const isVisible = visibleExchanges.includes(ex);
+                                    const hasData = multiHistory[ex]?.length > 0;
+                                    return (
+                                        <button 
+                                            key={ex} 
+                                            onClick={() => toggleExchangeVisibility(ex)}
+                                            className={`flex items-center gap-3 px-4 py-2 rounded-2xl border transition-all ${isVisible ? 'bg-white/[0.03] border-gray-800 opacity-100 shadow-lg' : 'border-transparent opacity-20 grayscale'}`}
+                                            title={`${multiHistory[ex]?.length || 0} data points`}
+                                        >
+                                            <div className="w-4 h-4 rounded-full flex items-center justify-center" style={{ backgroundColor: EXCHANGE_COLORS[ex] }}>
+                                                {isVisible ? <Eye size={8} className="text-black" /> : <EyeOff size={8} className="text-black" />}
+                                            </div>
+                                            <span className="text-[11px] font-black uppercase tracking-widest flex items-center gap-1.5" style={{ color: isVisible ? '#fff' : '#888' }}>
+                                                {ex}
+                                                {hasData && <span className="text-[7px] text-green-600 font-bold">✓</span>}
+                                            </span>
+                                        </button>
+                                    );
+                                })
+                            ) : !loadingMulti ? (
+                                <div className="text-gray-600 text-[10px] font-black uppercase tracking-widest">No exchanges have historical data for this pair</div>
+                            ) : null}
                         </div>
                     </div>
                 </div>

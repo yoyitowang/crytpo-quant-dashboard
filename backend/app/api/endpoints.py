@@ -142,6 +142,7 @@ async def fetch_coinw_history(symbol: str, days: int):
 async def get_aggregated_history(symbol: str, days: int = 7):
     """聚合查詢：並發向所有交易所請求該幣種的歷史，不再依賴本地資料庫。加入 Redis 快取。
     
+    只查詢在即時資料中有該幣種的交易所，避免無謂的 API 請求。
     Returns per-exchange data with status: {"data": {...}, "status": {"binance": "ok", ...}}
     Each exchange has a 15s timeout. Results returned as soon as all complete or timeout.
     """
@@ -155,7 +156,11 @@ async def get_aggregated_history(symbol: str, days: int = 7):
     except Exception as e:
         logger.error(f"Redis Read Error (history_all): {e}")
 
-    active_exchanges = [ex for ex in collector.exchanges.keys()]
+    clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
+    active_exchanges = []
+    for exch in collector.exchanges.keys():
+        if any(clean_sym in k.upper() for k in collector.latest_rates if exch in k):
+            active_exchanges.append(exch)
 
     async def fetch_with_name(exchange: str) -> tuple[str, list]:
         try:

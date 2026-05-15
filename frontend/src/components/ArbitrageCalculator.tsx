@@ -227,7 +227,10 @@ export function ArbitrageCalculator({ rates }: Props) {
 
             {/* Exchange A — Long */}
             <div className="bg-[#0a0a0a] border border-green-900/30 rounded-2xl p-5">
-              <div className="text-[10px] font-black text-green-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingUp size={12} /> Long Leg</div>
+              <div className="text-[10px] font-black text-green-500 uppercase tracking-widest mb-4 flex items-center justify-between">
+                <span className="flex items-center gap-2"><TrendingUp size={12} /> Long Leg</span>
+                {i.nameA && <button onClick={() => refreshFromMarket('A')} className="p-1 rounded-lg border border-green-900/30 text-green-700 hover:text-green-500 hover:border-green-600 transition-all" title="Refresh market data"><RefreshCw size={12} /></button>}
+              </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>
@@ -267,7 +270,10 @@ export function ArbitrageCalculator({ rates }: Props) {
 
             {/* Exchange B — Short */}
             <div className="bg-[#0a0a0a] border border-red-900/30 rounded-2xl p-5">
-              <div className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingDown size={12} /> Short Leg</div>
+              <div className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center justify-between">
+                <span className="flex items-center gap-2"><TrendingDown size={12} /> Short Leg</span>
+                {i.nameB && <button onClick={() => refreshFromMarket('B')} className="p-1 rounded-lg border border-red-900/30 text-red-700 hover:text-red-500 hover:border-red-600 transition-all" title="Refresh market data"><RefreshCw size={12} /></button>}
+              </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>

@@ -415,6 +415,55 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
     if ex_id == 'gate': ex_id = 'gateio'
     if ex_id == 'kucoin': limit = max(limit, 20)
 
+    # Aden: use perp-api.aden.io public order book endpoint
+    if ex_id == 'aden':
+        try:
+            ticker_id = f"{base}-PERP{quote}"
+            url = f"https://perp-api.aden.io/orderbook?ticker_id={ticker_id}&depth={limit}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        d = await resp.json()
+                        bids = d.get('bids', [])
+                        asks = d.get('asks', [])
+                        best_bid = float(bids[0][0]) if bids else 0
+                        best_ask = float(asks[0][0]) if asks else 0
+                        spread = ((best_ask - best_bid) / best_bid) * 100 if best_bid else 0
+                        return {
+                            "exchange": exchange, "symbol": symbol,
+                            "best_bid": best_bid, "best_ask": best_ask,
+                            "spread_pct": round(spread, 4),
+                            "bid_depth": len(bids), "ask_depth": len(asks),
+                            "buy_analysis": _calc_slippage(asks, buy_size, True),
+                            "sell_analysis": _calc_slippage(bids, sell_size, False),
+                            "bids": [[round(float(p), 6), round(float(q), 4)] for p, q in bids[:10]],
+                            "asks": [[round(float(p), 6), round(float(q), 4)] for p, q in asks[:10]],
+                        }
+        except Exception as e:
+            logger.error(f"Aden orderbook failed: {e}")
+            return {"error": f"Aden orderbook: {e}"}
+
+    # CoinW: use CCXT if available, otherwise REST
+    if ex_id == 'coinw':
+        try:
+            cl = ccxt_sync.coinw()
+            ob = cl.fetch_order_book(f"{base}/{quote}", limit=limit)
+            bids = ob.get('bids', []); asks = ob.get('asks', [])
+            best_bid = bids[0][0] if bids else 0; best_ask = asks[0][0] if asks else 0
+            spread = ((best_ask - best_bid) / best_bid) * 100 if best_bid else 0
+            return {
+                "exchange": exchange, "symbol": symbol,
+                "best_bid": best_bid, "best_ask": best_ask,
+                "spread_pct": round(spread, 4), "bid_depth": len(bids), "ask_depth": len(asks),
+                "buy_analysis": _calc_slippage(asks, buy_size, True),
+                "sell_analysis": _calc_slippage(bids, sell_size, False),
+                "bids": [[round(p, 6), round(q, 4)] for p, q in bids[:10]],
+                "asks": [[round(p, 6), round(q, 4)] for p, q in asks[:10]],
+            }
+        except Exception as e:
+            logger.error(f"CoinW orderbook failed: {e}")
+            return {"error": f"CoinW orderbook: {e}"}
+
     try:
         if hasattr(ccxt_async, ex_id):
             ex_class = getattr(ccxt_async, ex_id)

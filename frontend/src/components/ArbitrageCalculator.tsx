@@ -110,13 +110,72 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
   const [buySize, setBuySize] = useState(10000)
+  const [maxSlippage, setMaxSlippage] = useState(0.1)
+  const debounceRef = useRef<any>(null)
+
+  // Debounced fetch: only when user stops typing for 400ms
+  const fetchData = useCallback((qty: number) => {
+    if (!open || !exchange || !symbol) return
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      setLoading(true)
+      fetch(`/api/orderbook/${exchange}/${symbol}?buy_size=${qty}&sell_size=${qty}`)
+        .then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
+    }, 400)
+  }, [open, exchange, symbol])
 
   useEffect(() => {
-    if (!open || !exchange || !symbol) return
-    setLoading(true)
-    fetch(`/api/orderbook/${exchange}/${symbol}?buy_size=${buySize}&sell_size=${buySize}`)
-      .then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
-  }, [open, exchange, symbol, buySize])
+    fetchData(buySize)
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
+  }, [buySize])
+
+  useEffect(() => {
+    if (open && !data) fetchData(buySize)
+  }, [open])
+
+  // Calculate max order size for given max slippage
+  const suggestedSize = useMemo(() => {
+    if (!data?.asks || !data?.bids) return null
+    const maxSlippageRatio = maxSlippage / 100
+    const bestAsk = data.best_ask
+    const bestBid = data.best_bid
+    if (!bestAsk || !bestBid) return null
+
+    // Walk through asks until slippage exceeds limit
+    let buyQty = 0, buyCost = 0
+    for (const [price, qty] of data.asks) {
+      const nextBuyQty = buyQty + qty
+      const nextBuyCost = buyCost + qty * price
+      const avgPrice = nextBuyCost / nextBuyQty
+      const slippage = (avgPrice - bestAsk) / bestAsk
+      if (slippage > maxSlippageRatio) {
+        // Interpolate: how much can we take within limit?
+        const maxTake = (maxSlippageRatio * bestAsk * buyQty + buyCost - buyQty * bestAsk) / (bestAsk * (1 + maxSlippageRatio) - price)
+        buyQty += Math.max(0, maxTake)
+        break
+      }
+      buyQty = nextBuyQty
+      buyCost = nextBuyCost
+    }
+
+    // Same for sell side
+    let sellQty = 0, sellValue = 0
+    for (const [price, qty] of data.bids) {
+      const nextSellQty = sellQty + qty
+      const nextSellValue = sellValue + qty * price
+      const avgPrice = nextSellValue / nextSellQty
+      const slippage = (bestBid - avgPrice) / bestBid
+      if (slippage > maxSlippageRatio) {
+        const maxTake = (buyQty * bestBid - bestBid * (1 - maxSlippageRatio) * buyQty - buyCost + bestBid * buyQty) / (bestBid - price)
+        sellQty += Math.max(0, maxTake)
+        break
+      }
+      sellQty = nextSellQty
+      sellValue = nextSellValue
+    }
+
+    return { buy: Math.round(buyQty), sell: Math.round(sellQty) }
+  }, [data, maxSlippage])
 
   if (!exchange) return null
 
@@ -127,7 +186,7 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
       </button>
       {open && (
         <div className="mt-2 bg-[#111] rounded-xl p-3 border border-gray-800">
-          {loading ? (
+          {loading && !data ? (
             <div className="text-[8px] text-gray-600 animate-pulse">Loading order book...</div>
           ) : data?.error ? (
             <div className="text-[8px] text-red-500">{data.error}</div>
@@ -137,14 +196,17 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
                 <div><span className="text-gray-600">Bid:</span> <span className="text-green-500 font-bold">${data.best_bid?.toFixed(2)}</span></div>
                 <div><span className="text-gray-600">Ask:</span> <span className="text-red-500 font-bold">${data.best_ask?.toFixed(2)}</span></div>
                 <div><span className="text-gray-600">Spread:</span> <span className="text-white font-bold">{data.spread_pct}%</span></div>
-                <div><span className="text-gray-600">Bid/Ask depth:</span> <span className="text-white font-bold">{data.bid_depth}/{data.ask_depth}</span></div>
+                <div><span className="text-gray-600">Depth:</span> <span className="text-white font-bold">{data.bid_depth}/{data.ask_depth}</span></div>
               </div>
+
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-[7px] text-gray-600 whitespace-nowrap">Qty:</span>
                 <input type="number" value={buySize} onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setBuySize(v) }}
                   className="w-20 bg-black border border-gray-800 rounded-lg px-2 py-1 text-[8px] font-bold text-white focus:outline-none" />
+                {loading && <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />}
               </div>
-              <div className="grid grid-cols-2 gap-2 text-[8px]">
+
+              <div className="grid grid-cols-2 gap-2 mb-3 text-[8px]">
                 <div>
                   <div className="text-gray-600 mb-1">Buy {buySize.toLocaleString()}</div>
                   <div className="text-green-500 font-bold">~${data.buy_analysis?.avg_price?.toFixed(2)}</div>
@@ -157,6 +219,21 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
                   <div className="text-gray-700">slippage: {data.sell_analysis?.slippage_pct}% (${data.sell_analysis?.slippage_cost})</div>
                   {data.sell_analysis?.remaining > 0 && <div className="text-yellow-600">{data.sell_analysis.remaining} unfilled</div>}
                 </div>
+              </div>
+
+              <div className="border-t border-gray-800 pt-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[7px] text-gray-600 whitespace-nowrap">Max slippage:</span>
+                  <input type="number" step="0.01" value={maxSlippage} onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setMaxSlippage(v) }}
+                    className="w-14 bg-black border border-gray-800 rounded-lg px-2 py-1 text-[8px] font-bold text-white focus:outline-none" />
+                  <span className="text-[7px] text-gray-600">%</span>
+                </div>
+                {suggestedSize && (
+                  <div className="grid grid-cols-2 gap-2 text-[8px]">
+                    <div><span className="text-gray-600">Max buy:</span> <span className="text-green-500 font-bold">{suggestedSize.buy.toLocaleString()}</span></div>
+                    <div><span className="text-gray-600">Max sell:</span> <span className="text-red-500 font-bold">{suggestedSize.sell.toLocaleString()}</span></div>
+                  </div>
+                )}
               </div>
             </>
           ) : null}

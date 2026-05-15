@@ -440,8 +440,8 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
                             "bid_depth": len(bids), "ask_depth": len(asks),
                             "buy_analysis": _calc_slippage(asks, buy_size, True),
                             "sell_analysis": _calc_slippage(bids, sell_size, False),
-                            "bids": [[round(float(p), 6), round(float(q), 4)] for p, q in bids[:10]],
-                            "asks": [[round(float(p), 6), round(float(q), 4)] for p, q in asks[:10]],
+                            "bids": [[round(float(b[0]), 6), round(float(b[1]), 4)] for b in bids[:10]],
+                            "asks": [[round(float(a[0]), 6), round(float(a[1]), 4)] for a in asks[:10]],
                         }
         except Exception as e:
             logger.error(f"Aden orderbook failed: {e}")
@@ -461,8 +461,8 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
                 "spread_pct": round(spread, 4), "bid_depth": len(bids), "ask_depth": len(asks),
                 "buy_analysis": _calc_slippage(asks, buy_size, True),
                 "sell_analysis": _calc_slippage(bids, sell_size, False),
-                "bids": [[round(p, 6), round(q, 4)] for p, q in bids[:10]],
-                "asks": [[round(p, 6), round(q, 4)] for p, q in asks[:10]],
+                "bids": [[round(b[0], 6), round(b[1], 4)] for b in bids[:10]],
+                "asks": [[round(a[0], 6), round(a[1], 4)] for a in asks[:10]],
             }
         except Exception as e:
             logger.error(f"CoinW orderbook failed: {e}")
@@ -516,8 +516,8 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
                         "ask_depth": len(asks),
                         "buy_analysis": _calc_slippage(asks, buy_size, True),
                         "sell_analysis": _calc_slippage(bids, sell_size, False),
-                        "bids": [[round(p, 6), round(q, 4)] for p, q in bids[:10]],
-                        "asks": [[round(p, 6), round(q, 4)] for p, q in asks[:10]],
+                        "bids": [[round(b[0], 6), round(b[1], 4)] for b in bids[:10]],
+                        "asks": [[round(a[0], 6), round(a[1], 4)] for a in asks[:10]],
                     }
             finally:
                 await ex.close()

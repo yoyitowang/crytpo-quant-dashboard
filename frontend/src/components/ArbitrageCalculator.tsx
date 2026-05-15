@@ -284,22 +284,27 @@ export function ArbitrageCalculator({ rates }: Props) {
 
   const setStr = useCallback((k: keyof CalcInputs) => (v: string) => setI(p => ({ ...p, [k]: v })), [])
 
-  // Auto-fill when symbol+exchange changes
-  const refreshFromMarket = useCallback((side: 'A' | 'B') => {
+  // Get market data for an exchange+symbol
+  const marketFor = useCallback((side: 'A' | 'B') => {
     const ex = side === 'A' ? i.nameA : i.nameB
-    if (!i.symbol || !ex) return
+    if (!i.symbol || !ex) return null
     const key = `${ex}:${i.symbol}`
     const r = rates[key]
-    if (!r) return
-    const mp = r.mark_price ?? 0
-    const rate = r.rate * 100
-    setI(p => ({
-      ...p,
-      [side === 'A' ? 'entryA' : 'entryB']: mp,
-      [side === 'A' ? 'exitA' : 'exitB']: mp,
-      [side === 'A' ? 'rateA' : 'rateB']: rate,
-    }))
+    if (!r) return null
+    return { markPrice: r.mark_price ?? 0, fundingRate: r.rate * 100 }
   }, [i.symbol, i.nameA, i.nameB, rates])
+
+  const applyEntry = useCallback((side: 'A' | 'B') => {
+    const m = marketFor(side)
+    if (!m) return
+    setI(p => ({ ...p, [side === 'A' ? 'entryA' : 'entryB']: m.markPrice }))
+  }, [marketFor])
+
+  const applyExit = useCallback((side: 'A' | 'B') => {
+    const m = marketFor(side)
+    if (!m) return
+    setI(p => ({ ...p, [side === 'A' ? 'exitA' : 'exitB']: m.markPrice }))
+  }, [marketFor])
 
   const autoFill = useCallback((side: 'A' | 'B', ex: string) => {
     if (!i.symbol || !ex) return
@@ -375,6 +380,12 @@ export function ArbitrageCalculator({ rates }: Props) {
             {/* Exchange A — Long */}
             <div className="bg-[#0a0a0a] border border-green-900/30 rounded-2xl p-5">
               <div className="text-[10px] font-black text-green-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingUp size={12} /> Long Leg</div>
+              {(() => { const m = marketFor('A'); return m ? (
+                <div className="text-[8px] text-gray-600 mb-3 flex items-center gap-3 bg-green-900/10 rounded-lg px-3 py-2">
+                  <span>Market: <span className="text-white font-bold">${fmtPrice(m.markPrice)}</span></span>
+                  <span>Rate: <span className={m.fundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>{m.fundingRate >= 0 ? '+' : ''}{m.fundingRate.toFixed(4)}%</span></span>
+                </div>
+              ) : null})()}
               <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>
@@ -386,13 +397,17 @@ export function ArbitrageCalculator({ rates }: Props) {
                 </div>
                 <NumInput label="Funding Rate %" val={i.rateA} onChange={setNum('rateA')} />
                 <div className="relative">
-                  <NumInput label="Entry Price" val={i.entryA} onChange={setNum('entryA')} />
-                  {i.nameA && <button onClick={() => refreshFromMarket('A')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-green-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Entry Price</label>
+                    {i.nameA && <button onClick={() => applyEntry('A')} className="text-[7px] font-bold text-green-600 hover:text-green-400 transition-colors border border-green-900/30 px-1.5 py-0.5 rounded" title="Apply current market price">Apply</button>}
+                  </div>
+                  <input type="number" step="any" value={i.entryA} onChange={e => setNum('entryA')(e.target.value)}
+                    className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-green-600 transition-colors" />
                 </div>
                 <div className="relative">
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between mb-1">
                     <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Exit Price</label>
-                    {i.nameA && <button onClick={() => refreshFromMarket('A')} className="text-gray-600 hover:text-green-500 transition-colors" title="Refresh exit price & rate from market"><RefreshCw size={9} /></button>}
+                    {i.nameA && <button onClick={() => applyExit('A')} className="text-[7px] font-bold text-green-600 hover:text-green-400 transition-colors border border-green-900/30 px-1.5 py-0.5 rounded" title="Apply current market price">Apply</button>}
                   </div>
                   <input type="number" step="any" value={i.exitA} onChange={e => setNum('exitA')(e.target.value)}
                     className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-green-600 transition-colors" />
@@ -420,6 +435,12 @@ export function ArbitrageCalculator({ rates }: Props) {
             {/* Exchange B — Short */}
             <div className="bg-[#0a0a0a] border border-red-900/30 rounded-2xl p-5">
               <div className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingDown size={12} /> Short Leg</div>
+              {(() => { const m = marketFor('B'); return m ? (
+                <div className="text-[8px] text-gray-600 mb-3 flex items-center gap-3 bg-red-900/10 rounded-lg px-3 py-2">
+                  <span>Market: <span className="text-white font-bold">${fmtPrice(m.markPrice)}</span></span>
+                  <span>Rate: <span className={m.fundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>{m.fundingRate >= 0 ? '+' : ''}{m.fundingRate.toFixed(4)}%</span></span>
+                </div>
+              ) : null})()}
               <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>
@@ -431,13 +452,17 @@ export function ArbitrageCalculator({ rates }: Props) {
                 </div>
                 <NumInput label="Funding Rate %" val={i.rateB} onChange={setNum('rateB')} />
                 <div className="relative">
-                  <NumInput label="Entry Price" val={i.entryB} onChange={setNum('entryB')} />
-                  {i.nameB && <button onClick={() => refreshFromMarket('B')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-red-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Entry Price</label>
+                    {i.nameB && <button onClick={() => applyEntry('B')} className="text-[7px] font-bold text-red-600 hover:text-red-400 transition-colors border border-red-900/30 px-1.5 py-0.5 rounded" title="Apply current market price">Apply</button>}
+                  </div>
+                  <input type="number" step="any" value={i.entryB} onChange={e => setNum('entryB')(e.target.value)}
+                    className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-red-600 transition-colors" />
                 </div>
                 <div className="relative">
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between mb-1">
                     <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Exit Price</label>
-                    {i.nameB && <button onClick={() => refreshFromMarket('B')} className="text-gray-600 hover:text-red-500 transition-colors" title="Refresh exit price & rate from market"><RefreshCw size={9} /></button>}
+                    {i.nameB && <button onClick={() => applyExit('B')} className="text-[7px] font-bold text-red-600 hover:text-red-400 transition-colors border border-red-900/30 px-1.5 py-0.5 rounded" title="Apply current market price">Apply</button>}
                   </div>
                   <input type="number" step="any" value={i.exitB} onChange={e => setNum('exitB')(e.target.value)}
                     className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-red-600 transition-colors" />

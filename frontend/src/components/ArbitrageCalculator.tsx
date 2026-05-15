@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, memo, useCallback, useRef } from 'react'
-import { TrendingUp, TrendingDown, Zap, Calculator, AlertTriangle, Save, ArrowRight, ArrowLeft, RefreshCw, ArrowUpDown, Search } from 'lucide-react'
+import { TrendingUp, TrendingDown, Zap, Calculator, AlertTriangle, Save, ArrowRight, ArrowLeft, RefreshCw, ArrowUpDown, Search, BookOpen } from 'lucide-react'
 import type { FundingRate } from '../types'
 
 interface CalcInputs {
@@ -104,6 +104,67 @@ const ResultCard = memo(({ label, val, color, bold }: { label: string; val: numb
     <div className={`text-sm ${bold ? 'font-black' : 'font-bold'} ${color}`}>{val >= 0 ? '+' : ''}${val.toFixed(2)}</div>
   </div>
 ))
+
+const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: string }) => {
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [buySize, setBuySize] = useState(10000)
+
+  useEffect(() => {
+    if (!open || !exchange || !symbol) return
+    setLoading(true)
+    fetch(`/api/orderbook/${exchange}/${symbol}?buy_size=${buySize}&sell_size=${buySize}`)
+      .then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
+  }, [open, exchange, symbol, buySize])
+
+  if (!exchange) return null
+
+  return (
+    <div className="mt-2">
+      <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-[8px] font-bold text-gray-600 uppercase tracking-wider hover:text-gray-400 transition-colors">
+        <BookOpen size={10} /> Depth & Liquidity {open ? '▲' : '▼'}
+      </button>
+      {open && (
+        <div className="mt-2 bg-[#111] rounded-xl p-3 border border-gray-800">
+          {loading ? (
+            <div className="text-[8px] text-gray-600 animate-pulse">Loading order book...</div>
+          ) : data?.error ? (
+            <div className="text-[8px] text-red-500">{data.error}</div>
+          ) : data ? (
+            <>
+              <div className="grid grid-cols-2 gap-2 mb-2 text-[8px]">
+                <div><span className="text-gray-600">Bid:</span> <span className="text-green-500 font-bold">${data.best_bid?.toFixed(2)}</span></div>
+                <div><span className="text-gray-600">Ask:</span> <span className="text-red-500 font-bold">${data.best_ask?.toFixed(2)}</span></div>
+                <div><span className="text-gray-600">Spread:</span> <span className="text-white font-bold">{data.spread_pct}%</span></div>
+                <div><span className="text-gray-600">Bid/Ask depth:</span> <span className="text-white font-bold">{data.bid_depth}/{data.ask_depth}</span></div>
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[7px] text-gray-600 whitespace-nowrap">Qty:</span>
+                <input type="number" value={buySize} onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setBuySize(v) }}
+                  className="w-20 bg-black border border-gray-800 rounded-lg px-2 py-1 text-[8px] font-bold text-white focus:outline-none" />
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[8px]">
+                <div>
+                  <div className="text-gray-600 mb-1">Buy {buySize.toLocaleString()}</div>
+                  <div className="text-green-500 font-bold">~${data.buy_analysis?.avg_price?.toFixed(2)}</div>
+                  <div className="text-gray-700">slippage: {data.buy_analysis?.slippage_pct}% (${data.buy_analysis?.slippage_cost})</div>
+                  {data.buy_analysis?.remaining > 0 && <div className="text-yellow-600">{data.buy_analysis.remaining} unfilled</div>}
+                </div>
+                <div>
+                  <div className="text-gray-600 mb-1">Sell {buySize.toLocaleString()}</div>
+                  <div className="text-red-500 font-bold">~${data.sell_analysis?.avg_price?.toFixed(2)}</div>
+                  <div className="text-gray-700">slippage: {data.sell_analysis?.slippage_pct}% (${data.sell_analysis?.slippage_cost})</div>
+                  {data.sell_analysis?.remaining > 0 && <div className="text-yellow-600">{data.sell_analysis.remaining} unfilled</div>}
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+      )}
+    </div>
+  )
+})
 
 interface Props { rates: Record<string, FundingRate> }
 
@@ -260,6 +321,7 @@ export function ArbitrageCalculator({ rates }: Props) {
                   </span>
                 </div>
               )}
+              <DepthSection exchange={i.nameA} symbol={i.symbol} />
             </div>
 
             {/* Swap button below on mobile */}
@@ -287,14 +349,12 @@ export function ArbitrageCalculator({ rates }: Props) {
                   {i.nameB && <button onClick={() => refreshFromMarket('B')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-red-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
                 </div>
                 <div className="relative">
-                <div className="relative">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Exit Price</label>
                     {i.nameB && <button onClick={() => refreshFromMarket('B')} className="text-gray-600 hover:text-red-500 transition-colors" title="Refresh exit price & rate from market"><RefreshCw size={9} /></button>}
                   </div>
                   <input type="number" step="any" value={i.exitB} onChange={e => setNum('exitB')(e.target.value)}
                     className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-red-600 transition-colors" />
-                </div>
                 </div>
                 <NumInput label="Taker Fee %" val={i.feeB} onChange={setNum('feeB')} />
               </div>
@@ -306,7 +366,7 @@ export function ArbitrageCalculator({ rates }: Props) {
                   </span>
                 </div>
               )}
-            </div>
+              <DepthSection exchange={i.nameB} symbol={i.symbol} />
           </div>
 
           <div className="flex flex-wrap gap-4 mb-8 bg-[#0a0a0a] border border-gray-800 rounded-2xl p-5 items-end">
@@ -361,6 +421,7 @@ export function ArbitrageCalculator({ rates }: Props) {
           </div>
         </div>
       </div>
+    </div>
     </div>
   )
 }

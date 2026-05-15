@@ -379,6 +379,101 @@ async def get_funding_spreads():
             })
     return sorted(spreads, key=lambda x: x["spread"], reverse=True)
 
+
+def _calc_slippage(levels: list, size: float, is_buy: bool) -> dict:
+    """Estimate average fill price and slippage for a market order of `size` units.
+    `levels` is a list of [price, quantity] from order book (bids or asks).
+    """
+    remaining = size
+    total_cost = 0.0
+    filled = 0
+    for price, qty in levels:
+        if remaining <= 0:
+            break
+        take = min(qty, remaining)
+        total_cost += take * price
+        filled += take
+        remaining -= take
+    if filled == 0:
+        return {"filled": 0, "avg_price": 0, "slippage_pct": 0, "slippage_cost": 0}
+    avg_price = total_cost / filled
+    best_price = levels[0][0] if levels else 0
+    slippage_cost = total_cost - (filled * best_price)
+    slippage_pct = (slippage_cost / total_cost) * 100 if total_cost else 0
+    return {"filled": filled, "avg_price": round(avg_price, 6), "slippage_pct": round(abs(slippage_pct), 4), "slippage_cost": round(abs(slippage_cost), 2), "remaining": round(remaining, 6)}
+
+
+@router.get("/orderbook/{exchange}/{symbol}")
+async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: float = 10000, sell_size: float = 10000):
+    """Fetch order book + slippage analysis for a given exchange + symbol."""
+    match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+    if not match:
+        return {"error": "invalid symbol"}
+    base, quote = match.group(1).upper(), match.group(2).upper()
+
+    ex_id = exchange.lower()
+    if ex_id == 'gate': ex_id = 'gateio'
+    if ex_id == 'kucoin': limit = max(limit, 20)
+
+    try:
+        if hasattr(ccxt_async, ex_id):
+            ex_class = getattr(ccxt_async, ex_id)
+            ex = ex_class({'options': {'defaultType': 'swap'}, 'timeout': 15000})
+            try:
+                await ex.load_markets()
+
+                possible_syms = []
+                if ex_id == 'okx':
+                    possible_syms = [f"{base}-{quote}-SWAP", f"{base}/{quote}:{quote}"]
+                elif ex_id == 'binance':
+                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}{quote}"]
+                elif ex_id == 'mexc':
+                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}_{quote}"]
+                elif ex_id == 'hyperliquid':
+                    possible_syms = [f"{base}/{quote}:{quote}"]
+                else:
+                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}{quote}"]
+
+                ccxt_sym = None
+                for s in possible_syms:
+                    if s in ex.markets:
+                        ccxt_sym = s
+                        break
+                if not ccxt_sym:
+                    for s, m in ex.markets.items():
+                        if m.get('swap') and m.get('base') == base and (m.get('quote') == quote or m.get('settle') == quote):
+                            ccxt_sym = s
+                            break
+
+                if ccxt_sym and ex.has.get('fetchOrderBook'):
+                    ob = await ex.fetch_order_book(ccxt_sym, limit=limit)
+                    bids = ob.get('bids', [])
+                    asks = ob.get('asks', [])
+                    best_bid = bids[0][0] if bids else 0
+                    best_ask = asks[0][0] if asks else 0
+                    spread = ((best_ask - best_bid) / best_bid) * 100 if best_bid else 0
+
+                    return {
+                        "exchange": exchange,
+                        "symbol": symbol,
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "spread_pct": round(spread, 4),
+                        "bid_depth": len(bids),
+                        "ask_depth": len(asks),
+                        "buy_analysis": _calc_slippage(asks, buy_size, True),
+                        "sell_analysis": _calc_slippage(bids, sell_size, False),
+                        "bids": [[round(p, 6), round(q, 4)] for p, q in bids[:10]],
+                        "asks": [[round(p, 6), round(q, 4)] for p, q in asks[:10]],
+                    }
+            finally:
+                await ex.close()
+    except Exception as e:
+        logger.error(f"Orderbook fetch failed: {exchange}/{symbol}: {e}")
+        return {"error": str(e)}
+
+    return {"error": "unsupported exchange"}
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)

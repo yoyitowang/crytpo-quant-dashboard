@@ -1,6 +1,15 @@
 import { useState, useEffect, useMemo, memo, useCallback, useRef } from 'react'
 import { TrendingUp, TrendingDown, Zap, Calculator, AlertTriangle, Save, ArrowRight, ArrowLeft, RefreshCw, ArrowUpDown, Search, BookOpen } from 'lucide-react'
 import type { FundingRate } from '../types'
+const fmtPrice = (p: number) => {
+  if (!p) return '0'
+  if (p >= 10000) return p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  if (p >= 100) return p.toFixed(4)
+  if (p >= 1) return p.toFixed(6)
+  if (p >= 0.01) return p.toFixed(8)
+  return p.toFixed(10)
+}
+const fmtQty = (n: number) => n >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : n.toFixed(4)
 
 interface CalcInputs {
   symbol: string
@@ -193,8 +202,8 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
           ) : data ? (
             <>
               <div className="grid grid-cols-2 gap-2 mb-2 text-[8px]">
-                <div><span className="text-gray-600">Bid:</span> <span className="text-green-500 font-bold">${data.best_bid?.toFixed(2)}</span></div>
-                <div><span className="text-gray-600">Ask:</span> <span className="text-red-500 font-bold">${data.best_ask?.toFixed(2)}</span></div>
+                <div><span className="text-gray-600">Bid:</span> <span className="text-green-500 font-bold">${fmtPrice(data.best_bid)}</span></div>
+                <div><span className="text-gray-600">Ask:</span> <span className="text-red-500 font-bold">${fmtPrice(data.best_ask)}</span></div>
                 <div><span className="text-gray-600">Spread:</span> <span className="text-white font-bold">{data.spread_pct}%</span></div>
                 <div><span className="text-gray-600">Depth:</span> <span className="text-white font-bold">{data.bid_depth}/{data.ask_depth}</span></div>
               </div>
@@ -209,13 +218,13 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
               <div className="grid grid-cols-2 gap-2 mb-3 text-[8px]">
                 <div>
                   <div className="text-gray-600 mb-1">Buy {buySize.toLocaleString()}</div>
-                  <div className="text-green-500 font-bold">~${data.buy_analysis?.avg_price?.toFixed(2)}</div>
+                  <div className="text-green-500 font-bold">~${fmtPrice(data.buy_analysis?.avg_price)}</div>
                   <div className="text-gray-700">slippage: {data.buy_analysis?.slippage_pct}% (${data.buy_analysis?.slippage_cost})</div>
-                  {data.buy_analysis?.remaining > 0 && <div className="text-yellow-600">{data.buy_analysis.remaining} unfilled</div>}
+                  {data.buy_analysis?.remaining > 0 && <div className="text-yellow-600">{fmtQty(data.buy_analysis.remaining)} unfilled</div>}
                 </div>
                 <div>
                   <div className="text-gray-600 mb-1">Sell {buySize.toLocaleString()}</div>
-                  <div className="text-red-500 font-bold">~${data.sell_analysis?.avg_price?.toFixed(2)}</div>
+                  <div className="text-red-500 font-bold">~${fmtPrice(data.sell_analysis?.avg_price)}</div>
                   <div className="text-gray-700">slippage: {data.sell_analysis?.slippage_pct}% (${data.sell_analysis?.slippage_cost})</div>
                   {data.sell_analysis?.remaining > 0 && <div className="text-yellow-600">{data.sell_analysis.remaining} unfilled</div>}
                 </div>

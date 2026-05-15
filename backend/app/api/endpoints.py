@@ -382,14 +382,15 @@ async def get_funding_spreads():
 
 def _calc_slippage(levels: list, size: float, is_buy: bool) -> dict:
     """Estimate average fill price and slippage for a market order of `size` units.
-    `levels` is a list of [price, quantity] from order book (bids or asks).
+    `levels` is a list of [price, quantity, ...] from order book (bids or asks).
     """
     remaining = size
     total_cost = 0.0
     filled = 0
-    for price, qty in levels:
+    for level in levels:
         if remaining <= 0:
             break
+        price, qty = level[0], level[1]
         take = min(qty, remaining)
         total_cost += take * price
         filled += take
@@ -414,6 +415,9 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
     ex_id = exchange.lower()
     if ex_id == 'gate': ex_id = 'gateio'
     if ex_id == 'kucoin': limit = max(limit, 20)
+
+    # Normalize symbol to match order book format
+    raw_sym = f"{base}{quote}"
 
     # Aden: use perp-api.aden.io public order book endpoint
     if ex_id == 'aden':

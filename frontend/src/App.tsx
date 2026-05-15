@@ -20,6 +20,7 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
         if (!containerRef.current) return;
         try {
             if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+            seriesRef.current = {};
             const chart = createChart(containerRef.current, {
                 layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#888' },
                 grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
@@ -28,11 +29,10 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
                 timeScale: { borderColor: '#222', timeVisible: true, secondsVisible: false },
             });
             chartRef.current = chart;
-            seriesRef.current = {};
             setError('');
             const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
             window.addEventListener('resize', handleResize);
-            return () => { window.removeEventListener('resize', handleResize); try { chart.remove(); } catch {} };
+            return () => { window.removeEventListener('resize', handleResize); try { chart.remove(); } catch {}; chartRef.current = null; seriesRef.current = {}; };
         } catch (e: any) { setError('Chart init failed: ' + (e.message || e)); }
     }, [isCompare]);
 

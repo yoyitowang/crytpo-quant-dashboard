@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff, Bell, Calculator } from 'lucide-react';
 import { createChart, ColorType, IChartApi } from 'lightweight-charts';
 import type { FundingRate } from './types';
@@ -9,12 +9,22 @@ import { ToastContainer } from './components/ToastContainer';
 import { ArbitrageCalculator } from './components/ArbitrageCalculator';
 
 // --- TradingView 專業圖表組件 (支援動態隱藏) ---
-const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: { data: any, isCompare?: boolean, visibleExchanges?: string[] }) => {
+const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: { data: any, isCompare?: boolean, visibleExchanges?: string[] }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
+    const dataRef = useRef<any>(null);
+    const visRef = useRef<string[]>(ALL_EXCHANGES);
+    const keyRef = useRef<string>('');
 
     useEffect(() => {
         if (!containerRef.current) return;
+
+        // Detect actual content change via stable string key
+        const currKeys = Object.keys(data).sort().join(',') + '|' + [...visibleExchanges].sort().join(',');
+        if (keyRef.current === currKeys) return;
+        keyRef.current = currKeys;
+        dataRef.current = data;
+        visRef.current = visibleExchanges;
         try {
             const chart = createChart(containerRef.current, {
             layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#888' },
@@ -105,6 +115,7 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
 
     return <div ref={containerRef} className="w-full" />;
 };
+const TVChart = memo(TVChartRaw);
 
 function App() {
   const [rates, setRates] = useState<Record<string, FundingRate>>({});

@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff, Bell } from 'lucide-react';
+import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff, Bell, Calculator } from 'lucide-react';
 import { createChart, ColorType, IChartApi } from 'lightweight-charts';
 import type { FundingRate } from './types';
 import { EXCHANGE_COLORS, ALL_EXCHANGES } from './types';
 import { useAlerts } from './hooks/useAlerts';
 import { AlertPanel } from './components/AlertPanel';
 import { ToastContainer } from './components/ToastContainer';
+import { ArbitrageCalculator } from './components/ArbitrageCalculator';
 
 // --- TradingView 專業圖表組件 (支援動態隱藏) ---
 const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: { data: any, isCompare?: boolean, visibleExchanges?: string[] }) => {
@@ -106,6 +107,7 @@ function App() {
   const [summary, setSummary] = useState<any>(null);
   const [health, setHealth] = useState<any>(null);
   const [isAlertPanelOpen, setIsAlertPanelOpen] = useState(false);
+  const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const { rules, events, activeToastIds, soundEnabled, addRule, removeRule, toggleRule, toggleSound, dismissToast, checkAlerts } = useAlerts();
   const [history, setHistory] = useState<any[]>([]);
   const [multiHistory, setMultiHistory] = useState<any>(null);
@@ -420,6 +422,9 @@ function App() {
                 <div className="text-[10px] font-black uppercase tracking-tighter"><span className="text-gray-600">Last Sync:</span> <span className="text-blue-500">{formatLocalTime(health?.last_update)}</span></div>
                 <div className="flex items-center gap-2 mt-0.5"><div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} /><span className="text-[9px] font-bold text-gray-700 uppercase">Engine: {connected ? 'Online' : 'Offline'}</span></div>
             </div>
+            <button onClick={() => setIsCalculatorOpen(true)} className="p-2 rounded-xl border border-gray-800 hover:border-purple-600/50 hover:text-purple-500 text-gray-500 transition-all">
+              <Calculator size={16} />
+            </button>
             <button onClick={() => setIsAlertPanelOpen(true)} className="relative p-2 rounded-xl border border-gray-800 hover:border-yellow-600/50 hover:text-yellow-500 text-gray-500 transition-all">
               <Bell size={16} />
               {rules.some(r => r.enabled) && <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />}
@@ -823,6 +828,9 @@ function App() {
         )}
       </main>
 
+      {isCalculatorOpen && (
+        <ArbitrageCalculator onClose={() => setIsCalculatorOpen(false)} />
+      )}
       {isAlertPanelOpen && (
         <AlertPanel
           rules={rules}

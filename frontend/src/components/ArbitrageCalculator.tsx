@@ -123,6 +123,8 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
   const debounceRef = useRef<any>(null)
   const intervalRef = useRef<any>(null)
   const [countdown, setCountdown] = useState(30)
+  const buySizeRef = useRef(buySize)
+  buySizeRef.current = buySize
 
   const doFetch = useCallback((qty: number) => {
     if (!exchange || !symbol) return
@@ -145,20 +147,18 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
 
   useEffect(() => {
     if (open && !data) doFetch(buySize)
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
   }, [open])
 
-  // Auto-refresh every 30s while open
+  // Auto-refresh every 30s (always running when mounted)
   useEffect(() => {
-    if (!open) return
     intervalRef.current = setInterval(() => {
       setCountdown(prev => {
-        if (prev <= 1) { doFetch(buySize); return 30 }
+        if (prev <= 1) { if (open) doFetch(buySizeRef.current); return 30 }
         return prev - 1
       })
     }, 1000)
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [open, doFetch, buySize])
+  }, [open, doFetch])
 
   // Calculate max order size for given max slippage
   const suggestedSize = useMemo(() => {
@@ -212,12 +212,10 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
           <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-[8px] font-bold text-gray-600 uppercase tracking-wider hover:text-gray-400 transition-colors">
             <BookOpen size={10} /> Depth & Liquidity {open ? '▲' : '▼'}
           </button>
-          {open && (
-            <div className="flex items-center gap-2">
-              <span className="text-[7px] text-gray-700 font-mono">{countdown}s</span>
-              <button onClick={() => { setCountdown(30); doFetch(buySize) }} className="text-gray-600 hover:text-blue-500 transition-colors" title="Refresh now"><RefreshCw size={10} className={loading ? 'animate-spin' : ''} /></button>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <span className="text-[7px] text-gray-700 font-mono">{countdown}s</span>
+            <button onClick={() => { setCountdown(30); doFetch(buySize) }} className="text-gray-600 hover:text-blue-500 transition-colors" title="Refresh now"><RefreshCw size={10} className={loading ? 'animate-spin' : ''} /></button>
+          </div>
         </div>
       {open && (
         <div className="mt-2 bg-[#111] rounded-xl p-3 border border-gray-800">

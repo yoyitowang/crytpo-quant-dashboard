@@ -14,8 +14,8 @@ interface CalcResults {
 
 const STORAGE_KEY = 'quantmatrix_calc2'
 const DEFAULTS: CalcInputs = {
-  nameA: 'Exchange A', entryA: 50000, exitA: 51000, feeA: 0.06, rateA: 0.01,
-  nameB: 'Exchange B', entryB: 50010, exitB: 51010, feeB: 0.06, rateB: -0.005,
+  nameA: 'Exchange A', entryA: 80000, exitA: 81000, feeA: 0.06, rateA: -0.005,
+  nameB: 'Exchange B', entryB: 80010, exitB: 81010, feeB: 0.06, rateB: 0.01,
   size: 1, leverage: 1, cycles: 1,
 }
 
@@ -26,7 +26,7 @@ function loadSaved(): CalcInputs {
 
 function calc(i: CalcInputs): CalcResults {
   const n = i.size * i.entryA * i.leverage
-  const fi = n * (i.rateA - i.rateB) / 100 * i.cycles
+  const fi = n * (i.rateB - i.rateA) / 100 * i.cycles
   const pl = ((i.exitA - i.entryA) - (i.exitB - i.entryB)) * i.size * i.leverage
   const tf = n * (i.feeA + i.feeB) / 100 * 2
   const sc = Math.abs(i.entryA - i.entryB) * i.size * i.leverage + Math.abs(i.exitA - i.exitB) * i.size * i.leverage
@@ -164,8 +164,8 @@ export function ArbitrageCalculator() {
           <div className="mt-4 flex items-start gap-3 bg-[#0a0a0a] border border-gray-800 rounded-2xl p-4">
             <AlertTriangle size={14} className="text-yellow-500 shrink-0 mt-0.5" />
             <div className="text-[9px] text-gray-600 leading-relaxed">
-              <span className="font-bold text-gray-500">Strategy:</span> Long {i.nameA} (receives funding) + Short {i.nameB} (pays funding). 
-              Estimates assume perfect fills at given prices. Actual results vary with slippage, variable rates, and latency.
+              <span className="font-bold text-gray-500">Strategy:</span> Long low-rate leg + Short high-rate leg. 
+              Positive funding rate → Longs pay Shorts.
             </div>
           </div>
         </div>

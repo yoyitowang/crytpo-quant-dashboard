@@ -13,80 +13,87 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
     const seriesRef = useRef<Record<string, any>>({});
+    const [error, setError] = useState('');
 
-    // Create chart once on mount
+    // Create chart once on mount (re-create if isCompare changes)
     useEffect(() => {
         if (!containerRef.current) return;
-        const chart = createChart(containerRef.current, {
-            layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#888' },
-            grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
-            width: containerRef.current.clientWidth,
-            height: isCompare ? 500 : 350,
-            timeScale: { borderColor: '#222', timeVisible: true, secondsVisible: false },
-        });
-        chartRef.current = chart;
-        const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
-        window.addEventListener('resize', handleResize);
-        return () => { window.removeEventListener('resize', handleResize); chart.remove(); };
-    }, []);
+        try {
+            if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+            const chart = createChart(containerRef.current, {
+                layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#888' },
+                grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
+                width: containerRef.current.clientWidth,
+                height: isCompare ? 500 : 350,
+                timeScale: { borderColor: '#222', timeVisible: true, secondsVisible: false },
+            });
+            chartRef.current = chart;
+            seriesRef.current = {};
+            setError('');
+            const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
+            window.addEventListener('resize', handleResize);
+            return () => { window.removeEventListener('resize', handleResize); try { chart.remove(); } catch {} };
+        } catch (e: any) { setError('Chart init failed: ' + (e.message || e)); }
+    }, [isCompare]);
 
     // When data changes → rebuild all series
     useEffect(() => {
-        if (!chartRef.current) return;
+        if (!chartRef.current || !data) return;
         const chart = chartRef.current;
+        setError('');
+        try {
+            // Remove all old series
+            Object.values(seriesRef.current).forEach((s: any) => { try { chart.removeSeries(s); } catch {} });
+            seriesRef.current = {};
 
-        // Remove all old series
-        Object.values(seriesRef.current).forEach((s: any) => { try { chart.removeSeries(s); } catch {} });
-        seriesRef.current = {};
-
-        if (isCompare) {
-            Object.keys(data).forEach((ex) => {
-                const exData = data[ex];
-                if (!Array.isArray(exData) || exData.length === 0) return;
-                const isVisible = visibleExchanges.includes(ex);
-                const lineSeries = chart.addLineSeries({
-                    color: EXCHANGE_COLORS[ex] || '#888',
-                    lineWidth: 2,
-                    title: ex.toUpperCase(),
-                    visible: isVisible,
-                    priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
+            if (isCompare) {
+                Object.keys(data).forEach((ex) => {
+                    const exData = data[ex];
+                    if (!Array.isArray(exData) || exData.length === 0) return;
+                    const isVisible = visibleExchanges.includes(ex);
+                    const lineSeries = chart.addLineSeries({
+                        color: EXCHANGE_COLORS[ex] || '#888', lineWidth: 2, title: ex.toUpperCase(),
+                        visible: isVisible,
+                        priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
+                    });
+                    const sorted = [...exData].sort((a: any, b: any) => a.time - b.time).map((d: any) => ({ ...d, value: d.value * 100 }));
+                    lineSeries.setData(sorted);
+                    if (isVisible && sorted.length > 0) {
+                        const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
+                        lineSeries.createPriceLine({ price: avg, color: EXCHANGE_COLORS[ex] || '#888', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: `AVG (${ex.toUpperCase()}): ${avg.toFixed(4)}%` });
+                    }
+                    seriesRef.current[ex] = lineSeries;
                 });
-                const sorted = [...exData].sort((a: any, b: any) => a.time - b.time).map((d: any) => ({ ...d, value: d.value * 100 }));
-                lineSeries.setData(sorted);
-                if (isVisible && sorted.length > 0) {
+            } else if (Array.isArray(data) && data.length > 0) {
+                const baselineSeries = chart.addBaselineSeries({
+                    baseValue: { type: 'price', value: 0 },
+                    topLineColor: '#10b981', topFillColor1: 'rgba(16, 185, 129, 0.4)', topFillColor2: 'rgba(16, 185, 129, 0.05)',
+                    bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239, 68, 68, 0.05)', bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
+                    lineWidth: 3, priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
+                });
+                const sorted = [...data].sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()).map((d: any) => ({ time: new Date(d.timestamp).getTime() / 1000, value: d.rate * 100 }));
+                baselineSeries.setData(sorted);
+                if (sorted.length > 0) {
                     const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
-                    lineSeries.createPriceLine({ price: avg, color: EXCHANGE_COLORS[ex] || '#888', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: `AVG (${ex.toUpperCase()}): ${avg.toFixed(4)}%` });
+                    baselineSeries.createPriceLine({ price: avg, color: '#3B82F6', lineWidth: 2, lineStyle: 3, axisLabelVisible: true, title: `AVERAGE APR: ${avg.toFixed(4)}%` });
                 }
-                seriesRef.current[ex] = lineSeries;
-            });
-        } else {
-            const baselineSeries = chart.addBaselineSeries({
-                baseValue: { type: 'price', value: 0 },
-                topLineColor: '#10b981', topFillColor1: 'rgba(16, 185, 129, 0.4)', topFillColor2: 'rgba(16, 185, 129, 0.05)',
-                bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239, 68, 68, 0.05)', bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
-                lineWidth: 3,
-                priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
-            });
-            const sorted = [...data].sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()).map((d: any) => ({ time: new Date(d.timestamp).getTime() / 1000, value: d.rate * 100 }));
-            baselineSeries.setData(sorted);
-            if (sorted.length > 0) {
-                const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
-                baselineSeries.createPriceLine({ price: avg, color: '#3B82F6', lineWidth: 2, lineStyle: 3, axisLabelVisible: true, title: `AVERAGE APR: ${avg.toFixed(4)}%` });
+                seriesRef.current['_single'] = baselineSeries;
             }
-            seriesRef.current['_single'] = baselineSeries;
-        }
-        try { chart.timeScale().fitContent(); } catch {}
-    }, [data]); // only recreate when data actually changes
+            try { chart.timeScale().fitContent(); } catch {}
+        } catch (e: any) { setError('Chart render error: ' + (e.message || e)); }
+    }, [data, isCompare]);
 
     // When visibility changes → toggle existing series (NO chart recreation)
     useEffect(() => {
+        if (!data) return;
         Object.entries(seriesRef.current).forEach(([ex, series]: [string, any]) => {
             if (ex === '_single') return;
             try { series.applyOptions({ visible: visibleExchanges.includes(ex) }); } catch {}
         });
     }, [visibleExchanges]);
 
-    return <div ref={containerRef} className="w-full" />;
+    if (error) return <div className="text-red-500 text-[10px] p-4 text-center">{error}</div>;
+    return <div ref={containerRef} className="w-full" style={{ height: isCompare ? 500 : 350 }} />;
 };
 const TVChart = memo(TVChartRaw);
 

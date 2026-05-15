@@ -164,7 +164,6 @@ export function ArbitrageCalculator({ rates }: Props) {
     setI(p => ({
       ...p,
       [side === 'A' ? 'nameA' : 'nameB']: ex,
-      [side === 'A' ? 'entryA' : 'entryB']: mp,
       [side === 'A' ? 'exitA' : 'exitB']: mp,
       [side === 'A' ? 'rateA' : 'rateB']: rate,
     }))
@@ -249,6 +248,14 @@ export function ArbitrageCalculator({ rates }: Props) {
                 </div>
                 <NumInput label="Taker Fee %" val={i.feeA} onChange={setNum('feeA')} />
               </div>
+              {i.entryA > 0 && i.exitA > 0 && (
+                <div className="mt-3 pt-3 border-t border-gray-800 flex justify-between items-center">
+                  <span className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Long P&L</span>
+                  <span className={`text-[11px] font-black ${(i.exitA - i.entryA) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                    {(i.exitA - i.entryA) >= 0 ? '+' : ''}${((i.exitA - i.entryA) * i.size * i.leverage).toFixed(2)}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Swap button below on mobile */}
@@ -281,6 +288,14 @@ export function ArbitrageCalculator({ rates }: Props) {
                 </div>
                 <NumInput label="Taker Fee %" val={i.feeB} onChange={setNum('feeB')} />
               </div>
+              {i.entryB > 0 && i.exitB > 0 && (
+                <div className="mt-3 pt-3 border-t border-gray-800 flex justify-between items-center">
+                  <span className="text-[8px] font-bold text-gray-600 uppercase tracking-wider">Short P&L</span>
+                  <span className={`text-[11px] font-black ${(i.entryB - i.exitB) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                    {(i.entryB - i.exitB) >= 0 ? '+' : ''}${((i.entryB - i.exitB) * i.size * i.leverage).toFixed(2)}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 

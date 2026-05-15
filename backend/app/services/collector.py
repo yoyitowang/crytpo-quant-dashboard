@@ -269,18 +269,27 @@ class DataCollector:
                     try:
                         for p in pairs:
                             url = f"{rest_base}/v1/perpum/fundingRate?instrument={p.lower()}"
-                            async with session.get(url, timeout=5) as resp:
-                                res = await resp.json()
-                                if res.get('code') == 0 and 'data' in res:
-                                    item = res['data']
-                                    await self._notify_callbacks({
-                                        "exchange": "coinw",
-                                        "symbol": f"{p.upper()}USDT",
-                                        "rate": float(item['value']),
-                                        "settlement_time": None,
-                                        "timestamp": datetime.utcnow()
-                                    })
-                            await asyncio.sleep(0.15)
+                            try:
+                                async with session.get(url, timeout=5) as resp:
+                                    if resp.status == 429:
+                                        logger.warning(f"CoinW rate limited, backing off 5s")
+                                        await asyncio.sleep(5)
+                                        continue
+                                    if resp.status != 200:
+                                        continue
+                                    res = await resp.json()
+                                    if res.get('code') == 0 and 'data' in res:
+                                        item = res['data']
+                                        await self._notify_callbacks({
+                                            "exchange": "coinw",
+                                            "symbol": f"{p.upper()}USDT",
+                                            "rate": float(item['value']),
+                                            "settlement_time": None,
+                                            "timestamp": datetime.utcnow()
+                                        })
+                            except Exception as req_err:
+                                logger.debug(f"CoinW poll skip {p}: {req_err}")
+                            await asyncio.sleep(0.5)
                         await asyncio.sleep(600)
                     except Exception as e:
                         logger.error(f"CoinW Polling Error: {e}")

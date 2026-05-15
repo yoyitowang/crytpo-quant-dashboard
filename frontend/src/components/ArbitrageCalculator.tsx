@@ -121,17 +121,22 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
   const [buySize, setBuySize] = useState(10000)
   const [maxSlippage, setMaxSlippage] = useState(0.1)
   const debounceRef = useRef<any>(null)
+  const intervalRef = useRef<any>(null)
+  const [countdown, setCountdown] = useState(30)
 
-  // Debounced fetch: only when user stops typing for 400ms
+  const doFetch = useCallback((qty: number) => {
+    if (!exchange || !symbol) return
+    setLoading(true)
+    fetch(`/api/orderbook/${exchange}/${symbol}?buy_size=${qty}&sell_size=${qty}`)
+      .then(r => r.json()).then(d => { setData(d); setLoading(false); setCountdown(30) }).catch(() => setLoading(false))
+  }, [exchange, symbol])
+
+  // Debounced fetch for qty change
   const fetchData = useCallback((qty: number) => {
     if (!open || !exchange || !symbol) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    debounceRef.current = setTimeout(() => {
-      setLoading(true)
-      fetch(`/api/orderbook/${exchange}/${symbol}?buy_size=${qty}&sell_size=${qty}`)
-        .then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
-    }, 400)
-  }, [open, exchange, symbol])
+    debounceRef.current = setTimeout(() => doFetch(qty), 400)
+  }, [open, exchange, symbol, doFetch])
 
   useEffect(() => {
     fetchData(buySize)
@@ -139,8 +144,21 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
   }, [buySize])
 
   useEffect(() => {
-    if (open && !data) fetchData(buySize)
+    if (open && !data) doFetch(buySize)
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
   }, [open])
+
+  // Auto-refresh every 30s while open
+  useEffect(() => {
+    if (!open) return
+    intervalRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) { doFetch(buySize); return 30 }
+        return prev - 1
+      })
+    }, 1000)
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
+  }, [open, doFetch, buySize])
 
   // Calculate max order size for given max slippage
   const suggestedSize = useMemo(() => {
@@ -190,9 +208,17 @@ const DepthSection = memo(({ exchange, symbol }: { exchange: string; symbol: str
 
   return (
     <div className="mt-2">
-      <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-[8px] font-bold text-gray-600 uppercase tracking-wider hover:text-gray-400 transition-colors">
-        <BookOpen size={10} /> Depth & Liquidity {open ? '▲' : '▼'}
-      </button>
+        <div className="flex items-center justify-between">
+          <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-[8px] font-bold text-gray-600 uppercase tracking-wider hover:text-gray-400 transition-colors">
+            <BookOpen size={10} /> Depth & Liquidity {open ? '▲' : '▼'}
+          </button>
+          {open && (
+            <div className="flex items-center gap-2">
+              <span className="text-[7px] text-gray-700 font-mono">{countdown}s</span>
+              <button onClick={() => { setCountdown(30); doFetch(buySize) }} className="text-gray-600 hover:text-blue-500 transition-colors" title="Refresh now"><RefreshCw size={10} className={loading ? 'animate-spin' : ''} /></button>
+            </div>
+          )}
+        </div>
       {open && (
         <div className="mt-2 bg-[#111] rounded-xl p-3 border border-gray-800">
           {loading && !data ? (
@@ -336,6 +362,8 @@ export function ArbitrageCalculator({ rates }: Props) {
 
   const exOptionsA = i.symbol ? exForSym[i.symbol] || [] : []
   const exOptionsB = i.symbol ? exForSym[i.symbol] || [] : []
+  const marketA = i.nameA ? marketFor('A') : null
+  const marketB = i.nameB ? marketFor('B') : null
 
   return (
     <div className="w-full">
@@ -380,12 +408,12 @@ export function ArbitrageCalculator({ rates }: Props) {
             {/* Exchange A — Long */}
             <div className="bg-[#0a0a0a] border border-green-900/30 rounded-2xl p-5">
               <div className="text-[10px] font-black text-green-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingUp size={12} /> Long Leg</div>
-              {(() => { const m = marketFor('A'); return m ? (
+              {marketA && (
                 <div className="text-[8px] text-gray-600 mb-3 flex items-center gap-3 bg-green-900/10 rounded-lg px-3 py-2">
-                  <span>Market: <span className="text-white font-bold">${fmtPrice(m.markPrice)}</span></span>
-                  <span>Rate: <span className={m.fundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>{m.fundingRate >= 0 ? '+' : ''}{m.fundingRate.toFixed(4)}%</span></span>
+                  <span>Market: <span className="text-white font-bold">${fmtPrice(marketA.markPrice)}</span></span>
+                  <span>Rate: <span className={marketA.fundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>{marketA.fundingRate >= 0 ? '+' : ''}{marketA.fundingRate.toFixed(4)}%</span></span>
                 </div>
-              ) : null})()}
+              )}
               <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>
@@ -435,12 +463,12 @@ export function ArbitrageCalculator({ rates }: Props) {
             {/* Exchange B — Short */}
             <div className="bg-[#0a0a0a] border border-red-900/30 rounded-2xl p-5">
               <div className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingDown size={12} /> Short Leg</div>
-              {(() => { const m = marketFor('B'); return m ? (
+              {marketB && (
                 <div className="text-[8px] text-gray-600 mb-3 flex items-center gap-3 bg-red-900/10 rounded-lg px-3 py-2">
-                  <span>Market: <span className="text-white font-bold">${fmtPrice(m.markPrice)}</span></span>
-                  <span>Rate: <span className={m.fundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>{m.fundingRate >= 0 ? '+' : ''}{m.fundingRate.toFixed(4)}%</span></span>
+                  <span>Market: <span className="text-white font-bold">${fmtPrice(marketB.markPrice)}</span></span>
+                  <span>Rate: <span className={marketB.fundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>{marketB.fundingRate >= 0 ? '+' : ''}{marketB.fundingRate.toFixed(4)}%</span></span>
                 </div>
-              ) : null})()}
+              )}
               <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>

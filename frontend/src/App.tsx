@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
-import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff, Bell, Calculator } from 'lucide-react';
+import { Search, BarChart3, ArrowUpDown, ChevronLeft, ChevronRight, ChevronDown, Zap, Grid, LayoutGrid, Clock, Filter, CheckSquare, Square, TrendingUp, TrendingDown, Layers, Activity, Globe, ShieldCheck, AlertTriangle, Monitor, ExternalLink, X, Eye, EyeOff, Bell, Calculator, Star } from 'lucide-react';
 import { createChart, ColorType, IChartApi } from 'lightweight-charts';
 import type { FundingRate } from './types';
 import { EXCHANGE_COLORS, ALL_EXCHANGES } from './types';
@@ -146,6 +146,17 @@ function App() {
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
   const [sortConfig, setSortConfig] = useState<{key: string, direction: 'asc' | 'desc'}>({key: 'spread', direction: 'desc'});
+  const [favorites, setFavorites] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('quantmatrix_favorites') || '[]') } catch { return [] }
+  });
+  const [showFavOnly, setShowFavOnly] = useState(false);
+
+  // Persist favorites
+  useEffect(() => { localStorage.setItem('quantmatrix_favorites', JSON.stringify(favorites)) }, [favorites]);
+
+  const toggleFav = (sym: string) => {
+    setFavorites(prev => prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym]);
+  };
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [loadingMulti, setLoadingMulti] = useState(false);
   const [historyCache, setHistoryCache] = useState<Record<string, any>>({});
@@ -363,7 +374,11 @@ function App() {
     });
 
     if (search) result = result.filter(r => r.symbol.toLowerCase().includes(search.toLowerCase()));
+    if (showFavOnly) result = result.filter(r => favorites.includes(r.symbol));
     result.sort((a, b) => {
+        const aFav = favorites.includes(a.symbol) ? 1 : 0;
+        const bFav = favorites.includes(b.symbol) ? 1 : 0;
+        if (aFav !== bFav) return bFav - aFav; // favorites first
         let v1: any, v2: any;
         if (sortConfig.key === 'symbol') { v1 = a.symbol; v2 = b.symbol; }
         else if (sortConfig.key === 'maxApr') { v1 = a.maxApr > 0 ? a.maxApr : undefined; v2 = b.maxApr > 0 ? b.maxApr : undefined; }
@@ -376,7 +391,7 @@ function App() {
         return sortConfig.direction === 'asc' ? res : -res;
     });
     return result;
-  }, [rates, search, selectedExchanges, sortConfig]);
+  }, [rates, search, selectedExchanges, sortConfig, favorites, showFavOnly]);
 
   const currentSymbols = filteredData.slice((page - 1) * pageSize, page * pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
@@ -426,6 +441,9 @@ function App() {
             <button onClick={() => setIsAlertPanelOpen(true)} className="relative p-2 rounded-xl border border-gray-800 hover:border-yellow-600/50 hover:text-yellow-500 text-gray-500 transition-all">
               <Bell size={16} />
               {rules.some(r => r.enabled) && <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />}
+            </button>
+            <button onClick={() => setShowFavOnly(!showFavOnly)} className={`p-2 rounded-xl border transition-all ${showFavOnly ? 'bg-yellow-600/20 border-yellow-600/50 text-yellow-500' : 'border-gray-800 text-gray-600 hover:text-gray-400'}`} title={showFavOnly ? 'Show all' : 'Favorites only'}>
+              <Star size={14} className={showFavOnly ? 'fill-yellow-500' : ''} />
             </button>
             <input type="text" placeholder="SEARCH ASSET..." className="bg-[#111] border border-gray-800 rounded-full px-6 py-1.5 text-xs focus:outline-none focus:border-blue-900 w-48 font-bold uppercase" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
@@ -609,7 +627,12 @@ function App() {
                             <tr key={row.symbol} className="hover:bg-blue-600/[0.03] transition-colors group">
                                 <td className="px-8 py-5 sticky left-0 bg-[#0a0a0a] z-20 border-r border-gray-900 font-black text-white text-sm tracking-tighter cursor-pointer group" onClick={() => { setCompareSymbol(row.symbol); setTimeframe(7); }}>
                                     <div className="flex items-center justify-between">
-                                        <span>{row.base} <span className="text-[10px] text-gray-700 ml-1 font-bold">{row.quote}</span></span>
+                                        <div className="flex items-center gap-2">
+                                          <button onClick={e => { e.stopPropagation(); toggleFav(row.symbol) }} className="text-gray-800 hover:text-yellow-500 transition-colors" title={favorites.includes(row.symbol) ? 'Remove from favorites' : 'Add to favorites'}>
+                                            <Star size={12} className={favorites.includes(row.symbol) ? 'fill-yellow-500 text-yellow-500' : ''} />
+                                          </button>
+                                          <span>{row.base} <span className="text-[10px] text-gray-700 ml-1 font-bold">{row.quote}</span></span>
+                                        </div>
                                         <ExternalLink size={12} className="text-gray-800 group-hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all" />
                                     </div>
                                 </td>

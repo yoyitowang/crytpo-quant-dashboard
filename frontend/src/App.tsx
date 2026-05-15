@@ -13,7 +13,6 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
     const seriesRef = useRef<Record<string, any>>({});
-    const dataKeyRef = useRef<string>('');
 
     // Create chart once on mount
     useEffect(() => {
@@ -35,11 +34,6 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
     useEffect(() => {
         if (!chartRef.current) return;
         const chart = chartRef.current;
-
-        // Detect real data change (not just reference)
-        const newKey = JSON.stringify(Object.keys(data).sort()) + '|' + (Array.isArray(data) ? data.length : 'obj');
-        if (dataKeyRef.current === newKey) return;
-        dataKeyRef.current = newKey;
 
         // Remove all old series
         Object.values(seriesRef.current).forEach((s: any) => { try { chart.removeSeries(s); } catch {} });

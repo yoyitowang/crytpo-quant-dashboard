@@ -753,7 +753,7 @@ function App() {
             </div>
         )}
         {viewMode === 'calc' && (
-            <ArbitrageCalculator />
+            <ArbitrageCalculator rates={rates} />
         )}
 
         {compareSymbol && (

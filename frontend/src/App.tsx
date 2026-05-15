@@ -15,8 +15,8 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
 
     useEffect(() => {
         if (!containerRef.current) return;
-
-        const chart = createChart(containerRef.current, {
+        try {
+            const chart = createChart(containerRef.current, {
             layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#888' },
             grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
             width: containerRef.current.clientWidth,
@@ -27,12 +27,13 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
         if (isCompare) {
             // 多交易所比對模式
             Object.keys(data).forEach((ex) => {
+                const exData = data[ex];
+                if (!Array.isArray(exData) || exData.length === 0) return;
                 const isVisible = visibleExchanges.includes(ex);
                 const lineSeries = chart.addLineSeries({
                     color: EXCHANGE_COLORS[ex] || '#888',
                     lineWidth: 2,
                     title: ex.toUpperCase(),
-                    // 核心功能：根據狀態決定是否顯示
                     visible: isVisible,
                     priceFormat: {
                         type: 'custom',
@@ -40,7 +41,7 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
                         minMove: 0.0001
                     }
                 });
-                const sorted = data[ex].sort((a:any, b:any) => a.time - b.time)
+                const sorted = [...exData].sort((a:any, b:any) => a.time - b.time)
                     .map((d: any) => ({ ...d, value: d.value * 100 }));
                 lineSeries.setData(sorted);
                 
@@ -97,6 +98,9 @@ const TVChart = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: 
         const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
         window.addEventListener('resize', handleResize);
         return () => { window.removeEventListener('resize', handleResize); chart.remove(); };
+        } catch (e) {
+            console.error('TVChart render error:', e);
+        }
     }, [data, isCompare, visibleExchanges]); // 監聽 visibleExchanges 變化
 
     return <div ref={containerRef} className="w-full" />;

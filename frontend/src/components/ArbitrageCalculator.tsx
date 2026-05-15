@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, memo, useCallback } from 'react'
-import { TrendingUp, TrendingDown, Zap, Calculator, AlertTriangle, Save, ArrowRight, ArrowLeft, RefreshCw } from 'lucide-react'
+import { useState, useEffect, useMemo, memo, useCallback, useRef } from 'react'
+import { TrendingUp, TrendingDown, Zap, Calculator, AlertTriangle, Save, ArrowRight, ArrowLeft, RefreshCw, ArrowUpDown, Search } from 'lucide-react'
 import type { FundingRate } from '../types'
 
 interface CalcInputs {
@@ -56,6 +56,48 @@ const Selector = memo(({ label, options, value, onChange }: { label: string; opt
   </div>
 ))
 
+const SymbolPicker = memo(({ symbols, value, onChange }: { symbols: string[]; value: string; onChange: (v: string) => void }) => {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const filtered = useMemo(() => {
+    if (!query) return symbols
+    const q = query.toLowerCase()
+    return symbols.filter(s => s.toLowerCase().includes(q))
+  }, [symbols, query])
+
+  return (
+    <div ref={ref} className="relative">
+      <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Trading Pair</label>
+      <div className="relative">
+        <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+        <input type="text" value={open ? query : value} placeholder="Search pair..." onFocus={() => { setOpen(true); setQuery('') }}
+          onChange={e => { setQuery(e.target.value); setOpen(true) }}
+          className="w-full bg-[#111] border border-gray-800 rounded-xl pl-8 pr-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 top-full mt-1 bg-[#111] border border-gray-800 rounded-xl max-h-48 overflow-y-auto z-10 custom-scrollbar">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-[10px] text-gray-600">No matches</div>
+          ) : filtered.slice(0, 50).map(s => (
+            <button key={s} onClick={() => { onChange(s); setOpen(false); setQuery(s) }}
+              className={`w-full text-left px-3 py-2 text-xs font-bold transition-colors ${s === value ? 'text-purple-500 bg-purple-500/10' : 'text-white hover:bg-white/5'}`}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
+
 const ResultCard = memo(({ label, val, color, bold }: { label: string; val: number; color: string; bold?: boolean }) => (
   <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
     <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">{label}</div>
@@ -96,6 +138,22 @@ export function ArbitrageCalculator({ rates }: Props) {
   const setStr = useCallback((k: keyof CalcInputs) => (v: string) => setI(p => ({ ...p, [k]: v })), [])
 
   // Auto-fill when symbol+exchange changes
+  const refreshFromMarket = useCallback((side: 'A' | 'B') => {
+    const ex = side === 'A' ? i.nameA : i.nameB
+    if (!i.symbol || !ex) return
+    const key = `${ex}:${i.symbol}`
+    const r = rates[key]
+    if (!r) return
+    const mp = r.mark_price ?? 0
+    const rate = r.rate * 100
+    setI(p => ({
+      ...p,
+      [side === 'A' ? 'entryA' : 'entryB']: mp,
+      [side === 'A' ? 'exitA' : 'exitB']: mp,
+      [side === 'A' ? 'rateA' : 'rateB']: rate,
+    }))
+  }, [i.symbol, i.nameA, i.nameB, rates])
+
   const autoFill = useCallback((side: 'A' | 'B', ex: string) => {
     if (!i.symbol || !ex) return
     const key = `${ex}:${i.symbol}`
@@ -111,6 +169,14 @@ export function ArbitrageCalculator({ rates }: Props) {
       [side === 'A' ? 'rateA' : 'rateB']: rate,
     }))
   }, [i.symbol, rates])
+
+  const swapLegs = useCallback(() => {
+    setI(p => ({
+      ...p,
+      nameA: p.nameB, entryA: p.entryB, exitA: p.exitB, feeA: p.feeB, rateA: p.rateB,
+      nameB: p.nameA, entryB: p.entryA, exitB: p.exitA, feeB: p.feeA, rateB: p.rateA,
+    }))
+  }, [])
 
   const r = calc(i)
   const profit = r.isProfitable
@@ -143,8 +209,8 @@ export function ArbitrageCalculator({ rates }: Props) {
         <div className="p-8">
           {/* Symbol selector */}
           <div className="flex gap-4 mb-6 bg-[#0a0a0a] border border-gray-800 rounded-2xl p-4 items-end">
-            <div className="min-w-[200px]">
-              <Selector label="Trading Pair" options={symbols} value={i.symbol}
+            <div className="min-w-[220px]">
+              <SymbolPicker symbols={symbols} value={i.symbol}
                 onChange={v => setI(p => ({ ...p, symbol: v, nameA: '', nameB: '', entryA: 0, exitA: 0, entryB: 0, exitB: 0, rateA: 0, rateB: 0 }))} />
             </div>
             <div className="text-[9px] text-gray-600 flex items-center gap-2 pb-1">
@@ -152,11 +218,18 @@ export function ArbitrageCalculator({ rates }: Props) {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          <div className="relative grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            {/* Swap button */}
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 hidden lg:block">
+              <button onClick={swapLegs} className="p-2 rounded-xl bg-[#111] border border-gray-800 text-gray-500 hover:text-purple-500 hover:border-purple-600 transition-all" title="Swap Long/Short">
+                <ArrowUpDown size={16} />
+              </button>
+            </div>
+
             {/* Exchange A — Long */}
             <div className="bg-[#0a0a0a] border border-green-900/30 rounded-2xl p-5">
               <div className="text-[10px] font-black text-green-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingUp size={12} /> Long Leg</div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>
                   <select value={i.nameA} onChange={e => { setStr('nameA')(e.target.value); autoFill('A', e.target.value) }}
@@ -166,16 +239,29 @@ export function ArbitrageCalculator({ rates }: Props) {
                   </select>
                 </div>
                 <NumInput label="Funding Rate %" val={i.rateA} onChange={setNum('rateA')} />
-                <NumInput label="Entry Price" val={i.entryA} onChange={setNum('entryA')} />
-                <NumInput label="Exit Price" val={i.exitA} onChange={setNum('exitA')} />
+                <div className="relative">
+                  <NumInput label="Entry Price" val={i.entryA} onChange={setNum('entryA')} />
+                  {i.nameA && <button onClick={() => refreshFromMarket('A')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-green-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
+                </div>
+                <div className="relative">
+                  <NumInput label="Exit Price" val={i.exitA} onChange={setNum('exitA')} />
+                  {i.nameA && <button onClick={() => refreshFromMarket('A')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-green-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
+                </div>
                 <NumInput label="Taker Fee %" val={i.feeA} onChange={setNum('feeA')} />
               </div>
+            </div>
+
+            {/* Swap button below on mobile */}
+            <div className="flex justify-center lg:hidden">
+              <button onClick={swapLegs} className="p-2 rounded-xl bg-[#111] border border-gray-800 text-gray-500 hover:text-purple-500 transition-all">
+                <ArrowUpDown size={16} /> <span className="text-[10px] font-bold uppercase ml-1">Swap Legs</span>
+              </button>
             </div>
 
             {/* Exchange B — Short */}
             <div className="bg-[#0a0a0a] border border-red-900/30 rounded-2xl p-5">
               <div className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingDown size={12} /> Short Leg</div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                 <div>
                   <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exchange</label>
                   <select value={i.nameB} onChange={e => { setStr('nameB')(e.target.value); autoFill('B', e.target.value) }}
@@ -185,8 +271,14 @@ export function ArbitrageCalculator({ rates }: Props) {
                   </select>
                 </div>
                 <NumInput label="Funding Rate %" val={i.rateB} onChange={setNum('rateB')} />
-                <NumInput label="Entry Price" val={i.entryB} onChange={setNum('entryB')} />
-                <NumInput label="Exit Price" val={i.exitB} onChange={setNum('exitB')} />
+                <div className="relative">
+                  <NumInput label="Entry Price" val={i.entryB} onChange={setNum('entryB')} />
+                  {i.nameB && <button onClick={() => refreshFromMarket('B')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-red-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
+                </div>
+                <div className="relative">
+                  <NumInput label="Exit Price" val={i.exitB} onChange={setNum('exitB')} />
+                  {i.nameB && <button onClick={() => refreshFromMarket('B')} className="absolute top-5 right-1.5 p-1 text-gray-600 hover:text-red-500 transition-colors" title="Refresh from market"><RefreshCw size={10} /></button>}
+                </div>
                 <NumInput label="Taker Fee %" val={i.feeB} onChange={setNum('feeB')} />
               </div>
             </div>

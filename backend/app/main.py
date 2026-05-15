@@ -24,21 +24,30 @@ _db_write_queue: asyncio.Queue = None
 _db_enabled = False
 
 
+async def _init_db():
+    """Initialize PostgreSQL schema: drop old table if exists, create fresh."""
+    try:
+        async with engine.begin() as conn:
+            # Drop old table (safe: data accumulates from collectors)
+            await conn.execute(text("DROP TABLE IF EXISTS funding_rates CASCADE"))
+            await conn.run_sync(Base.metadata.create_all)
+            logger.info("PostgreSQL table initialized (funding_interval)")
+        return True
+    except Exception as e:
+        logger.warning(f"PostgreSQL init failed: {e}")
+        return False
+
+
 async def _db_writer():
     """Background task: batch-writes funding rate data to PostgreSQL."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     global _db_write_queue, _db_enabled
     _db_write_queue = asyncio.Queue(maxsize=50000)
 
-    # Initialize DB: create tables if possible
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        _db_enabled = True
-        logger.info("PostgreSQL initialized for history storage")
-    except Exception as e:
-        logger.warning(f"PostgreSQL unavailable, history will not be stored locally: {e}")
-        return  # DB writer exits silently — app continues without DB
+    if not await _init_db():
+        return  # DB unavailable — continue without it
+
+    _db_enabled = True
 
     while _db_enabled:
         batch = []
@@ -85,7 +94,7 @@ async def db_callback(data):
             "symbol": sym,
             "timestamp": datetime.utcnow(),
             "rate": float(item['rate']),
-            "interval": item.get('interval', 8),
+            "funding_interval": item.get('interval', 8),
             "settlement_time": item.get('settlement_time') if isinstance(item.get('settlement_time'), datetime) else None,
         })
 

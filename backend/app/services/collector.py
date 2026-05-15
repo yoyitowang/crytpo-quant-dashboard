@@ -231,7 +231,7 @@ class DataCollector:
                             "exchange": "binance", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
                             "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
                             "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000), "timestamp": datetime.utcnow()
-                        } for item in data if item.get('symbol') in trading_syms]
+                        } for item in data if item.get('symbol') in trading_syms and item.get('nextFundingTime', 0) > 1000000000000]
                         await self._notify_callbacks(batch)
                     await asyncio.sleep(30)
                 except Exception as e:

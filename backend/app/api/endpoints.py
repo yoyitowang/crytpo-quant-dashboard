@@ -31,7 +31,7 @@ async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
             if rows:
                 return [{"timestamp": r.timestamp.isoformat(), "rate": r.rate} for r in rows]
     except Exception as e:
-        logger.error(f"DB read error: {exchange}/{symbol}: {e}")
+        logger.debug(f"DB read unavailable ({exchange}/{symbol}): {e}")
     return []
 
 @router.get("/rates/compressed")

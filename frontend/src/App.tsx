@@ -56,7 +56,10 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
                         visible: isVisible,
                         priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
                     });
-                    const sorted = [...exData].sort((a: any, b: any) => a.time - b.time).map((d: any) => ({ ...d, value: d.value * 100 }));
+                    const sorted = [...exData]
+                        .sort((a: any, b: any) => a.time - b.time || -1)
+                        .filter((d: any, i: number, arr: any[]) => i === 0 || d.time !== arr[i-1].time)
+                        .map((d: any) => ({ ...d, value: d.value * 100 }));
                     lineSeries.setData(sorted);
                     if (isVisible && sorted.length > 0) {
                         const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
@@ -71,7 +74,10 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
                     bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239, 68, 68, 0.05)', bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
                     lineWidth: 3, priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
                 });
-                const sorted = [...data].sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()).map((d: any) => ({ time: new Date(d.timestamp).getTime() / 1000, value: d.rate * 100 }));
+                const sorted = [...data]
+                    .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime() || -1)
+                    .filter((d: any, i: number, arr: any[]) => i === 0 || new Date(d.timestamp).getTime() !== new Date(arr[i-1].timestamp).getTime())
+                    .map((d: any) => ({ time: new Date(d.timestamp).getTime() / 1000, value: d.rate * 100 }));
                 baselineSeries.setData(sorted);
                 if (sorted.length > 0) {
                     const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;

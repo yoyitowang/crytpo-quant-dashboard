@@ -65,7 +65,12 @@ async def _db_writer():
                     await session.execute(stmt)
                     await session.commit()
         except Exception as e:
-            logger.error(f"DB write error: {e}")
+            err_str = str(e)
+            if "no partition" in err_str or "does not exist" in err_str or "UndefinedColumn" in err_str:
+                logger.error(f"DB schema error — disabling DB writes: {err_str[:200]}")
+                _db_enabled = False
+            else:
+                logger.error(f"DB write error: {err_str[:200]}")
 
 
 async def db_callback(data):

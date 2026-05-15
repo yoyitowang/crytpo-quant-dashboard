@@ -223,7 +223,7 @@ class DataCollector:
                     # 獲取交易中合約清單以過濾 PENDING_TRADING 或 SETTLING (如 RLS, OXT)
                     async with session.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=10) as ex_resp:
                         ex_info = await ex_resp.json()
-                        trading_syms = {s['symbol'] for s in ex_info['symbols'] if s['status'] == 'TRADING'}
+                        trading_syms = {s['symbol'] for s in ex_info['symbols'] if s['status'] == 'TRADING' and s.get('contractType') == 'PERPETUAL'}
 
                     async with session.get(url, timeout=10) as resp:
                         data = await resp.json()

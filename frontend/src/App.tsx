@@ -12,30 +12,40 @@ import { ArbitrageCalculator } from './components/ArbitrageCalculator';
 const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES }: { data: any, isCompare?: boolean, visibleExchanges?: string[] }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
-    const dataRef = useRef<any>(null);
-    const visRef = useRef<string[]>(ALL_EXCHANGES);
-    const keyRef = useRef<string>('');
+    const seriesRef = useRef<Record<string, any>>({});
+    const dataKeyRef = useRef<string>('');
 
+    // Create chart once on mount
     useEffect(() => {
         if (!containerRef.current) return;
-
-        // Detect actual content change via stable string key
-        const currKeys = Object.keys(data).sort().join(',') + '|' + [...visibleExchanges].sort().join(',');
-        if (keyRef.current === currKeys) return;
-        keyRef.current = currKeys;
-        dataRef.current = data;
-        visRef.current = visibleExchanges;
-        try {
-            const chart = createChart(containerRef.current, {
+        const chart = createChart(containerRef.current, {
             layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#888' },
             grid: { vertLines: { color: '#111' }, horzLines: { color: '#111' } },
             width: containerRef.current.clientWidth,
             height: isCompare ? 500 : 350,
             timeScale: { borderColor: '#222', timeVisible: true, secondsVisible: false },
         });
+        chartRef.current = chart;
+        const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
+        window.addEventListener('resize', handleResize);
+        return () => { window.removeEventListener('resize', handleResize); chart.remove(); };
+    }, []);
+
+    // When data changes → rebuild all series
+    useEffect(() => {
+        if (!chartRef.current) return;
+        const chart = chartRef.current;
+
+        // Detect real data change (not just reference)
+        const newKey = JSON.stringify(Object.keys(data).sort()) + '|' + (Array.isArray(data) ? data.length : 'obj');
+        if (dataKeyRef.current === newKey) return;
+        dataKeyRef.current = newKey;
+
+        // Remove all old series
+        Object.values(seriesRef.current).forEach((s: any) => { try { chart.removeSeries(s); } catch {} });
+        seriesRef.current = {};
 
         if (isCompare) {
-            // 多交易所比對模式
             Object.keys(data).forEach((ex) => {
                 const exData = data[ex];
                 if (!Array.isArray(exData) || exData.length === 0) return;
@@ -45,73 +55,42 @@ const TVChartRaw = ({ data, isCompare = false, visibleExchanges = ALL_EXCHANGES 
                     lineWidth: 2,
                     title: ex.toUpperCase(),
                     visible: isVisible,
-                    priceFormat: {
-                        type: 'custom',
-                        formatter: (price: number) => price.toFixed(4) + '%',
-                        minMove: 0.0001
-                    }
+                    priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
                 });
-                const sorted = [...exData].sort((a:any, b:any) => a.time - b.time)
-                    .map((d: any) => ({ ...d, value: d.value * 100 }));
+                const sorted = [...exData].sort((a: any, b: any) => a.time - b.time).map((d: any) => ({ ...d, value: d.value * 100 }));
                 lineSeries.setData(sorted);
-                
-                // 新增平均值參考線
                 if (isVisible && sorted.length > 0) {
                     const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
-                    lineSeries.createPriceLine({
-                        price: avg,
-                        color: EXCHANGE_COLORS[ex] || '#888',
-                        lineWidth: 1,
-                        lineStyle: 3, // Dotted
-                        axisLabelVisible: true,
-                        title: `AVG (${ex.toUpperCase()}): ${avg.toFixed(4)}%`,
-                    });
+                    lineSeries.createPriceLine({ price: avg, color: EXCHANGE_COLORS[ex] || '#888', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: `AVG (${ex.toUpperCase()}): ${avg.toFixed(4)}%` });
                 }
+                seriesRef.current[ex] = lineSeries;
             });
         } else {
-            // 單交易所模式 (Baseline)
             const baselineSeries = chart.addBaselineSeries({
                 baseValue: { type: 'price', value: 0 },
                 topLineColor: '#10b981', topFillColor1: 'rgba(16, 185, 129, 0.4)', topFillColor2: 'rgba(16, 185, 129, 0.05)',
                 bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239, 68, 68, 0.05)', bottomFillColor2: 'rgba(239, 68, 68, 0.4)',
                 lineWidth: 3,
-                priceFormat: {
-                    type: 'custom',
-                    formatter: (price: number) => price.toFixed(4) + '%',
-                    minMove: 0.0001
-                }
+                priceFormat: { type: 'custom', formatter: (price: number) => price.toFixed(4) + '%', minMove: 0.0001 }
             });
-            const sorted = [...data].sort((a: any, b: any) => {
-                const t1 = new Date(a.timestamp).getTime() / 1000;
-                const t2 = new Date(b.timestamp).getTime() / 1000;
-                return t1 - t2;
-            }).map(d => ({ time: new Date(d.timestamp).getTime() / 1000 as any, value: d.rate * 100 }));
+            const sorted = [...data].sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()).map((d: any) => ({ time: new Date(d.timestamp).getTime() / 1000, value: d.rate * 100 }));
             baselineSeries.setData(sorted);
-
-            // 新增平均值參考線
             if (sorted.length > 0) {
-                const avg = sorted.reduce((acc, cur) => acc + cur.value, 0) / sorted.length;
-                baselineSeries.createPriceLine({
-                    price: avg,
-                    color: '#3B82F6',
-                    lineWidth: 2,
-                    lineStyle: 3, // Dotted
-                    axisLabelVisible: true,
-                    title: `AVERAGE APR: ${avg.toFixed(4)}%`,
-                });
+                const avg = sorted.reduce((acc: number, cur: any) => acc + cur.value, 0) / sorted.length;
+                baselineSeries.createPriceLine({ price: avg, color: '#3B82F6', lineWidth: 2, lineStyle: 3, axisLabelVisible: true, title: `AVERAGE APR: ${avg.toFixed(4)}%` });
             }
+            seriesRef.current['_single'] = baselineSeries;
         }
+        try { chart.timeScale().fitContent(); } catch {}
+    }, [data]); // only recreate when data actually changes
 
-        chart.timeScale().fitContent();
-        chartRef.current = chart;
-
-        const handleResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }); };
-        window.addEventListener('resize', handleResize);
-        return () => { window.removeEventListener('resize', handleResize); chart.remove(); };
-        } catch (e) {
-            console.error('TVChart render error:', e);
-        }
-    }, [data, isCompare, visibleExchanges]); // 監聽 visibleExchanges 變化
+    // When visibility changes → toggle existing series (NO chart recreation)
+    useEffect(() => {
+        Object.entries(seriesRef.current).forEach(([ex, series]: [string, any]) => {
+            if (ex === '_single') return;
+            try { series.applyOptions({ visible: visibleExchanges.includes(ex) }); } catch {}
+        });
+    }, [visibleExchanges]);
 
     return <div ref={containerRef} className="w-full" />;
 };

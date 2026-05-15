@@ -482,7 +482,7 @@ function App() {
                         {loadingHistory ? (
                             <LoadingSpinner label="Fetching Live Exchange History..." />
                         ) : history.length > 0 ? (
-                            <TVChart data={history} />
+                            <TVChart key={`single-${selectedPair?.exchange}-${selectedPair?.symbol}`} data={history} />
                         ) : (
                             <div className="text-gray-800 font-black uppercase text-[10px] tracking-widest">No historical data available for this pair</div>
                         )}
@@ -786,7 +786,7 @@ function App() {
                                     <LoadingSpinner label="Fetching exchange history data..." />
                                 </div>
                             ) : multiHistory && Object.keys(multiHistory).length > 0 ? (
-                                <TVChart data={multiHistory} isCompare={true} visibleExchanges={visibleExchanges} />
+                                <TVChart key={`cmp-${compareSymbol}`} data={multiHistory} isCompare={true} visibleExchanges={visibleExchanges} />
                             ) : !loadingMulti ? (
                                 <div className="text-gray-800 font-black uppercase text-[10px] tracking-widest">No historical data available</div>
                             ) : null}

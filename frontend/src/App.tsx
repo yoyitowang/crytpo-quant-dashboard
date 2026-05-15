@@ -107,7 +107,6 @@ function App() {
   const [summary, setSummary] = useState<any>(null);
   const [health, setHealth] = useState<any>(null);
   const [isAlertPanelOpen, setIsAlertPanelOpen] = useState(false);
-  const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const { rules, events, activeToastIds, soundEnabled, addRule, removeRule, toggleRule, toggleSound, dismissToast, checkAlerts } = useAlerts();
   const [history, setHistory] = useState<any[]>([]);
   const [multiHistory, setMultiHistory] = useState<any>(null);
@@ -116,7 +115,7 @@ function App() {
   const [timeframe, setTimeframe] = useState<number>(7);
   const [visibleExchanges, setVisibleExchanges] = useState<string[]>(ALL_EXCHANGES);
   const [connected, setConnected] = useState(false);
-  const [viewMode, setViewMode] = useState<'matrix' | 'heatplot'>('matrix');
+  const [viewMode, setViewMode] = useState<'matrix' | 'heatplot' | 'calc'>('matrix');
   const [dataMode, setDataMode] = useState<'funding' | 'all' | 'price'>('funding');
   const [search, setSearch] = useState('');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -407,24 +406,22 @@ function App() {
             <Zap size={22} className="text-blue-500 fill-blue-500" />
             <h1 className="text-xl font-black text-white italic tracking-tighter uppercase">QuantMatrix v11.6</h1>
           </div>
-           <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800">
-              <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
-              <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
-           </div>
-           <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800 gap-0.5">
-              <button onClick={() => setDataMode('funding')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'funding' ? 'bg-green-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Funding</button>
-              <button onClick={() => setDataMode('all')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'all' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>All</button>
-              <button onClick={() => setDataMode('price')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'price' ? 'bg-amber-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Price</button>
-           </div>
+             <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800">
+                <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
+                <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
+                <button onClick={() => setViewMode('calc')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'calc' ? 'bg-purple-600 text-white shadow-lg' : 'text-gray-500'}`}><Calculator size={14}/> Calc</button>
+             </div>
+             <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800 gap-0.5">
+                <button onClick={() => setDataMode('funding')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'funding' ? 'bg-green-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Funding</button>
+                <button onClick={() => setDataMode('all')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'all' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>All</button>
+                <button onClick={() => setDataMode('price')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'price' ? 'bg-amber-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Price</button>
+             </div>
         </div>
         <div className="flex items-center gap-6">
             <div className="flex flex-col items-end">
                 <div className="text-[10px] font-black uppercase tracking-tighter"><span className="text-gray-600">Last Sync:</span> <span className="text-blue-500">{formatLocalTime(health?.last_update)}</span></div>
                 <div className="flex items-center gap-2 mt-0.5"><div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} /><span className="text-[9px] font-bold text-gray-700 uppercase">Engine: {connected ? 'Online' : 'Offline'}</span></div>
             </div>
-            <button onClick={() => setIsCalculatorOpen(true)} className="p-2 rounded-xl border border-gray-800 hover:border-purple-600/50 hover:text-purple-500 text-gray-500 transition-all">
-              <Calculator size={16} />
-            </button>
             <button onClick={() => setIsAlertPanelOpen(true)} className="relative p-2 rounded-xl border border-gray-800 hover:border-yellow-600/50 hover:text-yellow-500 text-gray-500 transition-all">
               <Bell size={16} />
               {rules.some(r => r.enabled) && <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />}
@@ -556,7 +553,7 @@ function App() {
             </div>
         </div>
 
-        {viewMode === 'matrix' ? (
+        {viewMode === 'matrix' && (
         <div className="bg-[#0a0a0a] rounded-2xl border border-gray-900 overflow-hidden shadow-2xl">
             <div className="overflow-x-auto custom-scrollbar">
                 <table className="w-full text-left border-collapse table-fixed min-w-[1000px]">
@@ -697,7 +694,8 @@ function App() {
                 </div>
             </div>
         </div>
-        ) : (
+        )}
+        {viewMode === 'heatplot' && (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
                 {currentSymbols.map(row => (
                     <div key={row.symbol} className="bg-[#080808] border border-gray-900 rounded-2xl p-4 hover:border-blue-900/50 transition-all group overflow-hidden relative">
@@ -749,6 +747,9 @@ function App() {
                     </div>
                 ))}
             </div>
+        )}
+        {viewMode === 'calc' && (
+            <ArbitrageCalculator />
         )}
 
         {compareSymbol && (
@@ -828,9 +829,6 @@ function App() {
         )}
       </main>
 
-      {isCalculatorOpen && (
-        <ArbitrageCalculator onClose={() => setIsCalculatorOpen(false)} />
-      )}
       {isAlertPanelOpen && (
         <AlertPanel
           rules={rules}

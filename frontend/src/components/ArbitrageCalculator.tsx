@@ -1,240 +1,162 @@
-import { useState } from 'react'
-import { X, TrendingUp, TrendingDown, Minus, Zap, DollarSign, Percent, Calculator, AlertTriangle } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { TrendingUp, TrendingDown, Zap, DollarSign, Calculator, AlertTriangle, Save, ArrowRight, ArrowLeft } from 'lucide-react'
 
 interface CalcInputs {
-  entryPrice: number
-  exitPrice: number
-  positionSize: number
-  leverage: number
-  fundingRateA: number
-  fundingRateB: number
-  feeMakerA: number
-  feeTakerA: number
-  feeMakerB: number
-  feeTakerB: number
-  spreadEntry: number
-  spreadExit: number
-  holdCycles: number
+  nameA: string; entryA: number; exitA: number; feeA: number; rateA: number
+  nameB: string; entryB: number; exitB: number; feeB: number; rateB: number
+  size: number; leverage: number; cycles: number
 }
 
 interface CalcResults {
-  fundingIncome: number
-  tradingFees: number
-  spreadCost: number
-  netProfit: number
-  roi: number
-  isProfitable: boolean
-  breakEvenFunding: number
+  notional: number; fundingIncome: number; pricePnl: number; totalFees: number; spreadCost: number
+  netProfit: number; roi: number; isProfitable: boolean; breakEvenRate: number
 }
 
+const STORAGE_KEY = 'quantmatrix_calc2'
 const DEFAULTS: CalcInputs = {
-  entryPrice: 50000,
-  exitPrice: 51000,
-  positionSize: 1,
-  leverage: 1,
-  fundingRateA: 0.01,
-  fundingRateB: -0.005,
-  feeMakerA: 0.02,
-  feeTakerA: 0.06,
-  feeMakerB: 0.02,
-  feeTakerB: 0.06,
-  spreadEntry: 0.01,
-  spreadExit: 0.01,
-  holdCycles: 1,
+  nameA: 'Exchange A', entryA: 50000, exitA: 51000, feeA: 0.06, rateA: 0.01,
+  nameB: 'Exchange B', entryB: 50010, exitB: 51010, feeB: 0.06, rateB: -0.005,
+  size: 1, leverage: 1, cycles: 1,
 }
 
-function calculate(inputs: CalcInputs): CalcResults {
-  const notional = inputs.positionSize * inputs.entryPrice * inputs.leverage
-  const fundingIncome = notional * (inputs.fundingRateA - inputs.fundingRateB) / 100 * inputs.holdCycles
-  const feeEntry = notional * (inputs.feeTakerA + inputs.feeTakerB) / 100
-  const feeExit = notional * (inputs.feeTakerA + inputs.feeTakerB) / 100
-  const tradingFees = feeEntry + feeExit
-  const spreadCost = notional * (inputs.spreadEntry + inputs.spreadExit) / 100
-  const netProfit = fundingIncome - tradingFees - spreadCost
-  const roi = (netProfit / notional) * 100
-  const breakEvenFunding = (tradingFees + spreadCost) / notional / inputs.holdCycles * 100
-
-  return {
-    fundingIncome,
-    tradingFees,
-    spreadCost,
-    netProfit,
-    roi,
-    isProfitable: netProfit > 0,
-    breakEvenFunding,
-  }
+function loadSaved(): CalcInputs {
+  try { const s = localStorage.getItem(STORAGE_KEY); if (s) return { ...DEFAULTS, ...JSON.parse(s) } } catch {}
+  return DEFAULTS
 }
 
-export function ArbitrageCalculator({ onClose }: { onClose: () => void }) {
-  const [inputs, setInputs] = useState<CalcInputs>(DEFAULTS)
+function calc(i: CalcInputs): CalcResults {
+  const n = i.size * i.entryA * i.leverage
+  const fi = n * (i.rateA - i.rateB) / 100 * i.cycles
+  const pl = ((i.exitA - i.entryA) - (i.exitB - i.entryB)) * i.size * i.leverage
+  const tf = n * (i.feeA + i.feeB) / 100 * 2
+  const sc = Math.abs(i.entryA - i.entryB) * i.size * i.leverage + Math.abs(i.exitA - i.exitB) * i.size * i.leverage
+  const np = fi + pl - tf - sc
+  const roi = n > 0 ? (np / n) * 100 : 0
+  return { notional: n, fundingIncome: fi, pricePnl: pl, totalFees: tf, spreadCost: sc, netProfit: np, roi, isProfitable: np > 0, breakEvenRate: (tf + sc) / n * 100 / i.cycles }
+}
 
-  const set = (key: keyof CalcInputs, val: string) => {
-    const v = parseFloat(val)
-    if (!isNaN(v)) setInputs(prev => ({ ...prev, [key]: v }))
-  }
+export function ArbitrageCalculator() {
+  const [i, setI] = useState<CalcInputs>(loadSaved)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(i))
+    setSaved(true); const t = setTimeout(() => setSaved(false), 2000); return () => clearTimeout(t)
+  }, [i])
 
-  const results = calculate(inputs)
-  const isProfit = results.isProfitable
-  const netColor = isProfit ? 'text-green-500' : 'text-red-500'
-  const netBg = isProfit ? 'bg-green-500/10 border-green-900/30' : 'bg-red-500/10 border-red-900/30'
+  const set = (k: keyof CalcInputs, v: string) => { const n = parseFloat(v); if (!isNaN(n)) setI(p => ({ ...p, [k]: n })) }
+  const setStr = (k: keyof CalcInputs, v: string) => setI(p => ({ ...p, [k]: v }))
+
+  const r = calc(i)
+  const profit = r.isProfitable
+  const netC = profit ? 'text-green-500' : 'text-red-500'
+  const netBg = profit ? 'bg-green-500/10 border-green-900/30' : 'bg-red-500/10 border-red-900/30'
+
+  const Inp = ({ label, val, setKey, small }: { label: string; val: number | string; setKey: keyof CalcInputs; small?: boolean }) => (
+    <div>
+      <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">{label}</label>
+      <input type={typeof val === 'number' ? 'number' : 'text'} step="any" value={val}
+        onChange={e => (typeof val === 'number' ? set : setStr)(setKey, e.target.value)}
+        className={`w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors ${small ? 'py-2' : ''}`} />
+    </div>
+  )
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-[#080808] border border-gray-800 w-full max-w-4xl rounded-[32px] shadow-3xl overflow-hidden relative max-h-[95vh] flex flex-col">
-        <div className="h-1.5 bg-gradient-to-r from-blue-600 via-purple-500 to-pink-500 shrink-0" />
-
-        <div className="flex items-center justify-between px-8 py-6 border-b border-gray-900 shrink-0">
+    <div className="w-full">
+      <div className="bg-[#0a0a0a] border border-gray-900 rounded-2xl overflow-hidden">
+        <div className="h-1 bg-gradient-to-r from-blue-600 via-purple-500 to-pink-500" />
+        <div className="flex items-center justify-between px-8 py-5 border-b border-gray-900">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-purple-500/10 rounded-xl">
-              <Calculator size={18} className="text-purple-500" />
-            </div>
+            <div className="p-2 bg-purple-500/10 rounded-xl"><Calculator size={18} className="text-purple-500" /></div>
             <div>
               <h2 className="text-lg font-black text-white uppercase tracking-tight">Arbitrage Calculator</h2>
-              <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mt-0.5">Funding Rate Arbitrage P&L Estimator</p>
+              <p className="text-[9px] font-bold text-gray-600 uppercase tracking-widest mt-0.5">Cross-Exchange Funding Rate Arbitrage</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl border border-gray-800 text-gray-600 hover:text-white transition-all">
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setI(DEFAULTS)} className="text-[9px] font-black uppercase bg-[#111] px-4 py-2 rounded-xl border border-gray-800 text-gray-500 hover:text-white transition-all">Reset</button>
+            <div className={`flex items-center gap-1.5 text-[8px] font-bold uppercase tracking-wider transition-opacity ${saved ? 'opacity-100' : 'opacity-0'}`}>
+              <Save size={10} className="text-green-500" /> <span className="text-green-500">Saved</span>
+            </div>
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Left Column: Position & Funding */}
-            <div className="space-y-6">
-              <div className="bg-[#0a0a0a] border border-gray-800 rounded-2xl p-5">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-4 flex items-center gap-2"><DollarSign size={12} className="text-blue-500" /> Position</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Entry Price</label>
-                    <input type="number" value={inputs.entryPrice} onChange={e => set('entryPrice', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exit Price</label>
-                    <input type="number" value={inputs.exitPrice} onChange={e => set('exitPrice', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Position Size (units)</label>
-                    <input type="number" step="0.01" value={inputs.positionSize} onChange={e => set('positionSize', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Leverage</label>
-                    <input type="number" min="1" value={inputs.leverage} onChange={e => set('leverage', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-[#0a0a0a] border border-gray-800 rounded-2xl p-5">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-4 flex items-center gap-2"><Percent size={12} className="text-green-500" /> Funding Rates</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Rate A (long) %</label>
-                    <input type="number" step="0.001" value={inputs.fundingRateA} onChange={e => set('fundingRateA', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Rate B (short) %</label>
-                    <input type="number" step="0.001" value={inputs.fundingRateB} onChange={e => set('fundingRateB', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div className="col-span-2">
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Funding Cycles (settlements)</label>
-                    <input type="number" min="1" value={inputs.holdCycles} onChange={e => set('holdCycles', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                </div>
+        <div className="p-8">
+          {/* Two Exchange Columns */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            {/* Exchange A — Long */}
+            <div className="bg-[#0a0a0a] border border-green-900/30 rounded-2xl p-5">
+              <div className="text-[10px] font-black text-green-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingUp size={12} /> Long Leg</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Inp label="Exchange Name" val={i.nameA} setKey="nameA" />
+                <Inp label="Funding Rate %" val={i.rateA} setKey="rateA" />
+                <Inp label="Entry Price" val={i.entryA} setKey="entryA" />
+                <Inp label="Exit Price" val={i.exitA} setKey="exitA" />
+                <Inp label="Taker Fee %" val={i.feeA} setKey="feeA" />
               </div>
             </div>
-
-            {/* Right Column: Fees & Spread */}
-            <div className="space-y-6">
-              <div className="bg-[#0a0a0a] border border-gray-800 rounded-2xl p-5">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-4 flex items-center gap-2">Exchange Fees</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Ex A Taker %</label>
-                    <input type="number" step="0.001" value={inputs.feeTakerA} onChange={e => set('feeTakerA', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Ex B Taker %</label>
-                    <input type="number" step="0.001" value={inputs.feeTakerB} onChange={e => set('feeTakerB', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Ex A Maker %</label>
-                    <input type="number" step="0.001" value={inputs.feeMakerA} onChange={e => set('feeMakerA', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Ex B Maker %</label>
-                    <input type="number" step="0.001" value={inputs.feeMakerB} onChange={e => set('feeMakerB', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                </div>
+            {/* Exchange B — Short */}
+            <div className="bg-[#0a0a0a] border border-red-900/30 rounded-2xl p-5">
+              <div className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-4 flex items-center gap-2"><TrendingDown size={12} /> Short Leg</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Inp label="Exchange Name" val={i.nameB} setKey="nameB" />
+                <Inp label="Funding Rate %" val={i.rateB} setKey="rateB" />
+                <Inp label="Entry Price" val={i.entryB} setKey="entryB" />
+                <Inp label="Exit Price" val={i.exitB} setKey="exitB" />
+                <Inp label="Taker Fee %" val={i.feeB} setKey="feeB" />
               </div>
+            </div>
+          </div>
 
-              <div className="bg-[#0a0a0a] border border-gray-800 rounded-2xl p-5">
-                <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-4 flex items-center gap-2"><Zap size={12} className="text-purple-500" /> Cross-Exchange Spread</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Entry Spread %</label>
-                    <input type="number" step="0.001" value={inputs.spreadEntry} onChange={e => set('spreadEntry', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1.5 block">Exit Spread %</label>
-                    <input type="number" step="0.001" value={inputs.spreadExit} onChange={e => set('spreadExit', e.target.value)} className="w-full bg-[#111] border border-gray-800 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-purple-600 transition-colors" />
-                  </div>
-                </div>
-              </div>
+          {/* Position row */}
+          <div className="flex flex-wrap gap-4 mb-8 bg-[#0a0a0a] border border-gray-800 rounded-2xl p-5">
+            <div className="flex items-center gap-2 text-[10px] font-black text-gray-600 uppercase tracking-widest mr-2"><Zap size={12} /> Position</div>
+            <Inp label="Size (units)" val={i.size} setKey="size" />
+            <Inp label="Leverage" val={i.leverage} setKey="leverage" />
+            <Inp label="Funding Cycles" val={i.cycles} setKey="cycles" />
+            <div className="flex items-center bg-[#111] rounded-xl px-4 border border-gray-800 h-[42px] self-end">
+              <span className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mr-2">Notional</span>
+              <span className="text-xs font-black text-white">${r.notional.toLocaleString()}</span>
             </div>
           </div>
 
           {/* Results */}
-          <div className="mt-8">
-            <div className={`rounded-2xl border p-6 ${netBg}`}>
-              <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-5 flex items-center gap-2"><TrendingUp size={12} /> P&L Summary</div>
-              <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-                <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
-                  <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">Notional</div>
-                  <div className="text-sm font-black text-white">${(inputs.positionSize * inputs.entryPrice * inputs.leverage).toLocaleString()}</div>
+          <div className={`rounded-2xl border p-6 ${netBg}`}>
+            <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-5">P&L Breakdown</div>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+              <ResultCard label="Funding Income" val={r.fundingIncome} fmt="$" color={r.fundingIncome >= 0 ? 'text-green-500' : 'text-red-500'} />
+              <ResultCard label="Price P&L" val={r.pricePnl} fmt="$" color={r.pricePnl >= 0 ? 'text-green-500' : 'text-red-500'} />
+              <ResultCard label="Entry/Exit Spread" val={-r.spreadCost} fmt="$" color="text-yellow-500" />
+              <ResultCard label="Trading Fees" val={-r.totalFees} fmt="$" color="text-red-500" />
+              <ResultCard label="Net Profit" val={r.netProfit} fmt="$" color={netC} bold />
+            </div>
+            <div className="flex flex-wrap items-center gap-6">
+              <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-xl ${profit ? 'bg-green-500/10' : 'bg-red-500/10'}`}>
+                  {profit ? <TrendingUp size={20} className="text-green-500" /> : <TrendingDown size={20} className="text-red-500" />}
                 </div>
-                <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
-                  <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">Funding Income</div>
-                  <div className={`text-sm font-black ${results.fundingIncome >= 0 ? 'text-green-500' : 'text-red-500'}`}>{results.fundingIncome >= 0 ? '+' : ''}${results.fundingIncome.toFixed(2)}</div>
-                </div>
-                <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
-                  <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">Trading Fees</div>
-                  <div className="text-sm font-black text-red-500">-${results.tradingFees.toFixed(2)}</div>
-                </div>
-                <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
-                  <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">Spread Cost</div>
-                  <div className="text-sm font-black text-yellow-500">-${results.spreadCost.toFixed(2)}</div>
-                </div>
-                <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
-                  <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">Net Profit</div>
-                  <div className={`text-sm font-black ${netColor}`}>{results.netProfit >= 0 ? '+' : ''}${results.netProfit.toFixed(2)}</div>
+                <div>
+                  <div className={`text-2xl font-black ${netC}`}>{r.netProfit >= 0 ? '+' : ''}{r.netProfit.toFixed(2)} USDT</div>
+                  <div className="text-[10px] font-bold text-gray-600 uppercase tracking-wider mt-0.5">
+                    ROI: <span className={netC}>{r.roi >= 0 ? '+' : ''}{r.roi.toFixed(4)}%</span>
+                    &nbsp;·&nbsp;Break-even rate: <span className="text-white">{r.breakEvenRate.toFixed(4)}%</span>/cycle
+                  </div>
                 </div>
               </div>
-
-              <div className="flex flex-wrap items-center gap-6">
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-xl ${isProfit ? 'bg-green-500/10' : 'bg-red-500/10'}`}>
-                    {isProfit ? <TrendingUp size={20} className="text-green-500" /> : <TrendingDown size={20} className="text-red-500" />}
-                  </div>
-                  <div>
-                    <div className={`text-2xl font-black ${netColor}`}>{results.netProfit >= 0 ? '+' : ''}{results.netProfit.toFixed(2)} USDT</div>
-                    <div className="text-[10px] font-bold text-gray-600 uppercase tracking-wider mt-0.5">
-                      ROI: <span className={netColor}>{results.roi >= 0 ? '+' : ''}{results.roi.toFixed(4)}%</span>
-                    </div>
-                  </div>
+              <div className="h-10 w-px bg-gray-800" />
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  {profit
+                    ? <span className="text-[10px] font-black text-green-500 uppercase tracking-widest">✅ Profit Expected</span>
+                    : <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">❌ Loss Expected</span>}
                 </div>
-                <div className="h-10 w-px bg-gray-800" />
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    {isProfit ? (
-                      <span className="text-[10px] font-black text-green-500 uppercase tracking-widest flex items-center gap-1">✅ Profit Expected</span>
-                    ) : (
-                      <span className="text-[10px] font-black text-red-500 uppercase tracking-widest flex items-center gap-1">❌ Loss Expected</span>
-                    )}
+                {r.pricePnl !== 0 && (
+                  <div className="text-[8px] text-gray-600 font-bold flex items-center gap-1">
+                    Price spread: <span className={r.pricePnl > 0 ? 'text-green-500' : 'text-red-500'}>{r.pricePnl > 0 ? '+' : ''}{r.pricePnl.toFixed(2)} USDT</span>
+                    &nbsp;(
+                    <ArrowRight size={8} /> {i.nameA} {i.entryA.toFixed(2)} → {i.exitA.toFixed(2)}
+                    &nbsp;<ArrowLeft size={8} /> {i.nameB} {i.entryB.toFixed(2)} → {i.exitB.toFixed(2)})
                   </div>
-                  <div className="text-[8px] text-gray-600 font-bold">
-                    Break-even funding rate diff: <span className="text-white">{results.breakEvenFunding.toFixed(4)}%</span> per cycle
-                  </div>
-                </div>
+                )}
               </div>
             </div>
           </div>
@@ -242,12 +164,21 @@ export function ArbitrageCalculator({ onClose }: { onClose: () => void }) {
           <div className="mt-4 flex items-start gap-3 bg-[#0a0a0a] border border-gray-800 rounded-2xl p-4">
             <AlertTriangle size={14} className="text-yellow-500 shrink-0 mt-0.5" />
             <div className="text-[9px] text-gray-600 leading-relaxed">
-              <span className="font-bold text-gray-500">Disclaimer:</span> This calculator provides estimates only. Actual results may vary due to 
-              slippage, variable funding rates, exchange latency, and market movements. Always test with small positions first.
+              <span className="font-bold text-gray-500">Strategy:</span> Long {i.nameA} (pays funding) + Short {i.nameB} (receives funding). 
+              Estimates assume perfect fills at given prices. Actual results vary with slippage, variable funding rates, and latency.
             </div>
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+function ResultCard({ label, val, fmt, color, bold }: { label: string; val: number; fmt: string; color: string; bold?: boolean }) {
+  return (
+    <div className="bg-[#111] rounded-xl p-4 border border-gray-800">
+      <div className="text-[8px] font-bold text-gray-600 uppercase tracking-wider mb-1">{label}</div>
+      <div className={`text-sm ${bold ? 'font-black' : 'font-bold'} ${color}`}>{val >= 0 ? '+' : ''}{fmt}{val.toFixed(2)}</div>
     </div>
   )
 }

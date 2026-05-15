@@ -5,7 +5,7 @@ Set in .env: ADEN_API_USER, ADEN_API_SIGNER, ADEN_API_PRIVATE_KEY
 import time
 import urllib.parse
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ async def fetch_funding_rate_history(symbol: str, limit: int = 500) -> list:
                     data = await resp.json()
                     if isinstance(data, list) and data:
                         return [{
-                            "timestamp": datetime.fromtimestamp(d["fundingTime"] / 1000).isoformat(),
+                            "timestamp": datetime.fromtimestamp(d["fundingTime"] / 1000, tz=timezone.utc).isoformat(),
                             "rate": float(d["fundingRate"]),
                         } for d in data if d.get("fundingRate") is not None]
                 else:

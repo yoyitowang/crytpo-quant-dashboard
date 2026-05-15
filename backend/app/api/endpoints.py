@@ -8,7 +8,7 @@ import logging
 import json
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import ccxt.async_support as ccxt_async
 from sqlalchemy import select, desc
 
@@ -252,7 +252,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                         data = await resp.json()
                         if isinstance(data, list):
                             res = [{
-                                "timestamp": datetime.fromtimestamp(d['fundingTime'] / 1000).isoformat(),
+                                "timestamp": datetime.fromtimestamp(d['fundingTime'] / 1000, tz=timezone.utc).isoformat(),
                                 "rate": float(d['fundingRate'])
                             } for d in data if d.get('fundingRate') is not None]
                             res.sort(key=lambda x: x['timestamp'])
@@ -341,7 +341,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                     for h in hist:
                         if h.get('fundingRate') is not None:
                             api_data.append({
-                                "timestamp": datetime.fromtimestamp(h['timestamp']/1000).isoformat(),
+                                "timestamp": datetime.fromtimestamp(h['timestamp']/1000, tz=timezone.utc).isoformat(),
                                 "rate": float(h['fundingRate'])
                             })
 

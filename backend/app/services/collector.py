@@ -431,7 +431,7 @@ class DataCollector:
                             })
                     if batch: await self._notify_callbacks(batch)
             except Exception as e: logger.error("bybit_initial_fetch_failed", error=str(e)[:200])
-        async with websockets.connect(url, ping_interval=20) as ws:
+        async with websockets.connect(url, ping_interval=20, open_timeout=30) as ws:
             for i in range(0, len(all_symbols), 100):
                 batch = all_symbols[i:i+100]
                 await ws.send(json.dumps({"op": "subscribe", "args": [f"tickers.{s}" for s in batch]}))
@@ -555,7 +555,7 @@ class DataCollector:
                     if batch: await self._notify_callbacks(batch)
             except Exception as e: logger.error("bitget_initial_fetch_failed", error=str(e)[:200])
         
-        async with websockets.connect(url, ping_interval=15) as ws:
+        async with websockets.connect(url, ping_interval=15, open_timeout=30) as ws:
             for i in range(0, len(all_symbols), 100):
                 batch = all_symbols[i:i+100]
                 await ws.send(json.dumps({"op": "subscribe", "args": [{"instType": "USDT-FUTURES", "channel": "ticker", "instId": s} for s in batch]}))

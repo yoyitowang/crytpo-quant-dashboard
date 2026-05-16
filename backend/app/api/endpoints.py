@@ -214,7 +214,7 @@ async def get_aggregated_history(symbol: str, days: int = 7):
         try:
             data = await asyncio.wait_for(
                 get_historical_rates(exchange, symbol, days),
-                timeout=15
+                timeout=30
             )
             return exchange, data
         except asyncio.TimeoutError:

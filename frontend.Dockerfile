@@ -1,16 +1,13 @@
-FROM node:20-slim
-
+FROM node:20-slim AS build
 WORKDIR /app
-
-# 1. 複製 package.json
 COPY frontend/package.json ./
-
-# 2. 使用快一點的鏡像站並安裝 (加上 --prefer-offline 盡量使用本地快取)
 RUN npm config set registry https://registry.npmmirror.com && \
     npm install --prefer-offline --no-audit --progress=false
-
-# 3. 複製其餘程式碼
 COPY frontend/ ./
+RUN npm run build
 
-# 啟動開發伺服器
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+FROM nginx:alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

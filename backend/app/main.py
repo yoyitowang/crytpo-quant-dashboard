@@ -6,12 +6,13 @@ from backend.app.services.collector import collector
 from backend.app.models.funding_rate import FundingRate
 from backend.app.db.session import SessionLocal
 from backend.app.services.websocket_manager import ws_manager
-from redis import asyncio as aioredis
+from backend.app.dependencies import set_redis, get_redis
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
+from redis import asyncio as aioredis
 
 structlog.configure(
     processors=[
@@ -27,7 +28,6 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
-redis: aioredis.Redis = None
 local_rate_cache = {}
 
 _db_write_queue: asyncio.Queue = None
@@ -99,7 +99,7 @@ async def _db_writer():
 
 async def db_callback(data):
     """Redis + PostgreSQL 寫入"""
-    global redis
+    redis = get_redis()
     if redis is None: return
 
     items = data if isinstance(data, list) else [data]
@@ -121,7 +121,7 @@ async def db_callback(data):
         db_rows.append({
             "exchange": exch,
             "symbol": sym,
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
             "rate": float(item['rate']),
             "funding_interval": item.get('interval', 8),
             "settlement_time": item.get('settlement_time') if isinstance(item.get('settlement_time'), datetime) else None,
@@ -144,8 +144,8 @@ async def ws_callback(data):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global redis
-    redis = aioredis.from_url(f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}", decode_responses=True)
+    r = aioredis.from_url(f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}", decode_responses=True)
+    set_redis(r)
 
     asyncio.create_task(_db_writer())
     collector.register_callback(db_callback)
@@ -153,7 +153,8 @@ async def lifespan(app: FastAPI):
     collector_task = asyncio.create_task(collector.start())
     yield
     collector_task.cancel()
-    await redis.close()
+    await r.close()
+    set_redis(None)
 
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])

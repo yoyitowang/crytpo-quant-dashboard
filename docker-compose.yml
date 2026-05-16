@@ -3,15 +3,17 @@ services:
     image: postgres:15-alpine
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: funding_rates
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-funding_rates}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - db_backup:/backup
+    command: postgres -c shared_buffers=512MB -c max_connections=200 -c effective_cache_size=2GB
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -34,7 +36,14 @@ services:
     restart: always
     environment:
       - POSTGRES_SERVER=db
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-funding_rates}
       - REDIS_HOST=redis
+      - ENV=${ENV:-dev}
+      - ADEN_API_USER=${ADEN_API_USER:-}
+      - ADEN_API_SIGNER=${ADEN_API_SIGNER:-}
+      - ADEN_API_PRIVATE_KEY=${ADEN_API_PRIVATE_KEY:-}
     depends_on:
       db:
         condition: service_healthy
@@ -47,9 +56,10 @@ services:
       dockerfile: frontend.Dockerfile
     restart: always
     ports:
-      - "5173:5173"
+      - "5173:80"
     depends_on:
       - backend
 
 volumes:
   postgres_data:
+  db_backup:

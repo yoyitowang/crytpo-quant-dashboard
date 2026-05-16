@@ -3,6 +3,7 @@ from backend.app.services.collector import collector
 from backend.app.services.websocket_manager import ws_manager
 from backend.app.db.session import SessionLocal
 from backend.app.models.funding_rate import FundingRate
+from backend.app.dependencies import get_redis
 from typing import List
 import structlog
 import json
@@ -19,7 +20,7 @@ logger = structlog.get_logger()
 async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
     """Query funding rate history from local PostgreSQL (fast, no external API)."""
     clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
-    since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
     try:
         async with SessionLocal() as session:
             stmt = select(FundingRate).where(
@@ -39,7 +40,7 @@ async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
 async def get_compressed_rates():
     """極簡版數據介面，專供前端快速渲染矩陣使用，移除不必要的欄位與冗餘計算。"""
     try:
-        from backend.app.main import redis
+        redis = get_redis()
         if redis is None: return []
         keys = await redis.keys("latest:*")
         if not keys: return []
@@ -72,7 +73,7 @@ async def health_live():
 
 @router.get("/health/ready")
 async def health_ready():
-    from backend.app.main import redis
+    redis = get_redis()
     issues = []
     if redis is None:
         issues.append("redis unavailable")
@@ -105,7 +106,7 @@ async def health_ready():
 @router.get("/rates/latest")
 async def get_latest_rates():
     try:
-        from backend.app.main import redis
+        redis = get_redis()
         if redis is None: return []
         keys = await redis.keys("latest:*")
         if not keys: return []
@@ -118,7 +119,7 @@ async def get_latest_rates():
 @router.get("/analysis/summary")
 async def get_market_summary():
     try:
-        from backend.app.main import redis
+        redis = get_redis()
         if redis is None: return {}
         keys = await redis.keys("latest:*")
         if not keys: return {}
@@ -192,7 +193,7 @@ async def get_aggregated_history(symbol: str, days: int = 7):
     """
     cache_key = f"history_all:{symbol}:{days}"
     try:
-        from backend.app.main import redis
+        redis = get_redis()
         if redis:
             cached = await redis.get(cache_key)
             if cached:
@@ -249,7 +250,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
     """獲取單一交易所歷史資料：全面改為即時 API 抓取，加入 Redis 快取保護。"""
     cache_key = f"history:{exchange.lower()}:{symbol.upper()}:{days}"
     try:
-        from backend.app.main import redis
+        redis = get_redis()
         if redis:
             cached = await redis.get(cache_key)
             if cached:
@@ -306,7 +307,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
             if res:
                 res.sort(key=lambda x: x['timestamp'])
                 try:
-                    from backend.app.main import redis
+                    redis = get_redis()
                     if redis:
                         await redis.setex(cache_key, 900, json.dumps(res))
                 except: pass
@@ -360,7 +361,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                             break
 
                 if ccxt_sym and ex.has.get('fetchFundingRateHistory'):
-                    since = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+                    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
                     limit = 1000
                     hist = await ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=limit)
 
@@ -388,7 +389,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
     # Fallback to DB if live API returned nothing
     if db_hist:
         try:
-            from backend.app.main import redis
+            redis = get_redis()
             if redis:
                 await redis.setex(cache_key, 900, json.dumps(db_hist))
         except: pass
@@ -411,7 +412,7 @@ async def get_funding_spreads():
             spreads.append({
                 "symbol": sym, "min_exchange": rates_sorted[0]["exchange"], "min_rate": rates_sorted[0]["rate"],
                 "max_exchange": rates_sorted[-1]["exchange"], "max_rate": rates_sorted[-1]["rate"],
-                "spread": rates_sorted[-1]["rate"] - rates_sorted[0]["rate"], "timestamp": datetime.utcnow().isoformat()
+                "spread": rates_sorted[-1]["rate"] - rates_sorted[0]["rate"], "timestamp": datetime.now(timezone.utc).isoformat()
             })
     return sorted(spreads, key=lambda x: x["spread"], reverse=True)
 
@@ -574,7 +575,7 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
-        from backend.app.main import redis
+        redis = get_redis()
         if redis:
             keys = await redis.keys("latest:*")
             if keys:

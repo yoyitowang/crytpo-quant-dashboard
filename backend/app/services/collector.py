@@ -248,7 +248,7 @@ class DataCollector:
                         batch = [{
                             "exchange": "binance", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
                             "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
-                            "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000), "timestamp": datetime.utcnow()
+                            "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000, tz=timezone.utc), "timestamp": datetime.now(timezone.utc)
                         } for item in data if item.get('symbol') in trading_syms and item.get('nextFundingTime', 0) > 1000000000000]
                         await self._notify_callbacks(batch)
                     await asyncio.sleep(30)
@@ -303,7 +303,7 @@ class DataCollector:
                                             "symbol": f"{p.upper()}USDT",
                                             "rate": float(item['value']),
                                             "settlement_time": None,
-                                            "timestamp": datetime.utcnow()
+                                            "timestamp": datetime.now(timezone.utc)
                                         })
                             except Exception as req_err:
                                 logger.debug("coinw_poll_skip", symbol=p, error=str(req_err)[:200])
@@ -351,8 +351,8 @@ class DataCollector:
                         # 過期過濾
                         next_settle_ms = res.get("nt")
                         if next_settle_ms:
-                            next_settle_dt = datetime.fromtimestamp(next_settle_ms / 1000)
-                            if next_settle_dt < datetime.now().replace(tzinfo=None):
+                            next_settle_dt = datetime.fromtimestamp(next_settle_ms / 1000, tz=timezone.utc)
+                            if next_settle_dt < datetime.now(timezone.utc):
                                 continue
                         
                         await self._notify_callbacks({
@@ -361,7 +361,7 @@ class DataCollector:
                             "rate": float(res["r"]),
                             "mark_price": mark_prices.get(pair),
                             "settlement_time": next_settle_dt if next_settle_ms else None,
-                            "timestamp": datetime.utcnow()
+                            "timestamp": datetime.now(timezone.utc)
                         })
 
     async def _okx_handler(self):
@@ -403,9 +403,9 @@ class DataCollector:
                             "exchange": "okx", "symbol": item['instId'],
                             "rate": float(item['fundingRate']),
                             "mark_price": mark_prices.get(item['instId']),
-                            "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000),
+                            "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000, tz=timezone.utc),
                             "interval": interval,
-                            "timestamp": datetime.utcnow()
+                            "timestamp": datetime.now(timezone.utc)
                         })
 
     async def _bybit_handler(self):
@@ -426,8 +426,8 @@ class DataCollector:
                             batch.append({
                                 "exchange": "bybit", "symbol": item['symbol'], "rate": float(item['fundingRate']),
                                 "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
-                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
-                                "timestamp": datetime.utcnow()
+                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000, tz=timezone.utc) if item.get('nextFundingTime') else None,
+                                "timestamp": datetime.now(timezone.utc)
                             })
                     if batch: await self._notify_callbacks(batch)
             except Exception as e: logger.error("bybit_initial_fetch_failed", error=str(e)[:200])
@@ -444,8 +444,8 @@ class DataCollector:
                         await self._notify_callbacks({
                             "exchange": "bybit", "symbol": item['symbol'], "rate": float(item['fundingRate']),
                             "mark_price": float(item['markPrice']) if 'markPrice' in item and item['markPrice'] else None,
-                            "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if 'nextFundingTime' in item else None,
-                            "timestamp": datetime.utcnow()
+                            "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000, tz=timezone.utc) if 'nextFundingTime' in item else None,
+                            "timestamp": datetime.now(timezone.utc)
                         })
 
     async def _kucoin_handler(self):
@@ -464,8 +464,8 @@ class DataCollector:
                                         "rate": float(item.get('fundingFeeRate') or 0),
                                         "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
                                         "interval": int(item.get('fundingRateGranularity') or 28800000) // 3600000,
-                                        "settlement_time": datetime.fromtimestamp(item['nextFundingRateDateTime'] / 1000) if item.get('nextFundingRateDateTime') else None, 
-                                        "timestamp": datetime.utcnow()
+                                        "settlement_time": datetime.fromtimestamp(item['nextFundingRateDateTime'] / 1000, tz=timezone.utc) if item.get('nextFundingRateDateTime') else None, 
+                                        "timestamp": datetime.now(timezone.utc)
                                     })
                     await asyncio.sleep(30)
                 except: await asyncio.sleep(10)
@@ -499,9 +499,9 @@ class DataCollector:
                                     await self._notify_callbacks({
                                         "exchange": "mexc", "symbol": item['symbol'], "rate": float(item['fundingRate']),
                                         "mark_price": mark_prices.get(item['symbol']),
-                                        "settlement_time": datetime.fromtimestamp(item['nextSettleTime'] / 1000) if item.get('nextSettleTime') else None,
+                                        "settlement_time": datetime.fromtimestamp(item['nextSettleTime'] / 1000, tz=timezone.utc) if item.get('nextSettleTime') else None,
                                         "interval": int(item.get('collectCycle', 8)),
-                                        "timestamp": datetime.utcnow()
+                                        "timestamp": datetime.now(timezone.utc)
                                     })
                     await asyncio.sleep(30)
                 except: await asyncio.sleep(15)
@@ -523,9 +523,9 @@ class DataCollector:
                                     await self._notify_callbacks({
                                         "exchange": "bingx", "symbol": item['symbol'], "rate": float(item['lastFundingRate']),
                                         "mark_price": float(item['markPrice']) if item.get('markPrice') else None,
-                                        "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000) if item.get('nextFundingTime') else None,
+                                        "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000, tz=timezone.utc) if item.get('nextFundingTime') else None,
                                         "interval": int(item.get('fundingIntervalHours', 8)),
-                                        "timestamp": datetime.utcnow()
+                                        "timestamp": datetime.now(timezone.utc)
                                     })
                     await asyncio.sleep(30)
                 except: await asyncio.sleep(15)
@@ -549,8 +549,8 @@ class DataCollector:
                             batch.append({
                                 "exchange": "bitget", "symbol": item['symbol'], "rate": float(item['fundingRate']),
                                 "mark_price": float(mp) if mp else None,
-                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
-                                "timestamp": datetime.utcnow()
+                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000, tz=timezone.utc) if item.get('nextFundingTime') else None,
+                                "timestamp": datetime.now(timezone.utc)
                             })
                     if batch: await self._notify_callbacks(batch)
             except Exception as e: logger.error("bitget_initial_fetch_failed", error=str(e)[:200])
@@ -571,8 +571,8 @@ class DataCollector:
                             await self._notify_callbacks({
                                 "exchange": "bitget", "symbol": item['instId'], "rate": float(item['fundingRate']),
                                 "mark_price": float(mp) if mp else None,
-                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000) if item.get('nextFundingTime') else None,
-                                "timestamp": datetime.utcnow()
+                                "settlement_time": datetime.fromtimestamp(int(item['nextFundingTime']) / 1000, tz=timezone.utc) if item.get('nextFundingTime') else None,
+                                "timestamp": datetime.now(timezone.utc)
                             })
 
     async def _gate_handler(self):
@@ -593,7 +593,7 @@ class DataCollector:
                             batch.append({
                                 "exchange": "gate", "symbol": item['contract'], "rate": float(item['funding_rate']),
                                 "mark_price": float(item['mark_price']) if item.get('mark_price') else None,
-                                "settlement_time": None, "timestamp": datetime.utcnow()
+                                "settlement_time": None, "timestamp": datetime.now(timezone.utc)
                             })
                     if batch: await self._notify_callbacks(batch)
             except Exception as e: logger.error("gate_initial_fetch_failed", error=str(e)[:200])
@@ -602,7 +602,7 @@ class DataCollector:
             for i in range(0, len(all_symbols), 100):
                 batch = all_symbols[i:i+100]
                 await ws.send(json.dumps({
-                    "time": int(datetime.utcnow().timestamp()), 
+                    "time": int(datetime.now(timezone.utc).timestamp()), 
                     "channel": "futures.tickers", 
                     "event": "subscribe", 
                     "payload": batch
@@ -618,7 +618,7 @@ class DataCollector:
                         await self._notify_callbacks({
                             "exchange": "gate", "symbol": item['contract'], "rate": float(item['funding_rate']),
                             "mark_price": float(item['mark_price']) if item.get('mark_price') else None,
-                            "settlement_time": None, "timestamp": datetime.utcnow()
+                            "settlement_time": None, "timestamp": datetime.now(timezone.utc)
                         })
 
     async def _aden_handler(self):
@@ -656,7 +656,7 @@ class DataCollector:
                                 mark_price = item.get('mark_price')
                                 interval = int(item.get('funding_interval', 28800)) // 3600
                                 settle_ts = item.get('funding_next_apply')
-                                settle_time = datetime.fromtimestamp(settle_ts) if settle_ts else None
+                                settle_time = datetime.fromtimestamp(settle_ts, tz=timezone.utc) if settle_ts else None
                                 batch.append({
                                     "exchange": "aden",
                                     "symbol": name,
@@ -664,7 +664,7 @@ class DataCollector:
                                     "mark_price": float(mark_price) if mark_price else None,
                                     "settlement_time": settle_time,
                                     "interval": interval,
-                                    "timestamp": datetime.utcnow()
+                                    "timestamp": datetime.now(timezone.utc)
                                 })
                             if batch:
                                 await self._notify_callbacks(batch)
@@ -703,7 +703,7 @@ class DataCollector:
                                     "rate": float(funding),
                                     "mark_price": float(mark) if mark else None,
                                     "interval": 1,
-                                    "timestamp": datetime.utcnow()
+                                    "timestamp": datetime.now(timezone.utc)
                                 })
                             if batch:
                                 await self._notify_callbacks(batch)
@@ -745,7 +745,7 @@ class DataCollector:
                                 continue
                             mark = item.get('markPrice')
                             next_ts = item.get('nextFundingTime')
-                            settle_time = datetime.fromtimestamp(next_ts / 1000) if next_ts else None
+                            settle_time = datetime.fromtimestamp(next_ts / 1000, tz=timezone.utc) if next_ts else None
                             interval = intervals.get(sym, 8)
                             batch.append({
                                 "exchange": "asterdex",
@@ -754,7 +754,7 @@ class DataCollector:
                                 "mark_price": float(mark) if mark else None,
                                 "settlement_time": settle_time,
                                 "interval": interval,
-                                "timestamp": datetime.utcnow()
+                                "timestamp": datetime.now(timezone.utc)
                             })
                         if batch:
                             await self._notify_callbacks(batch)
@@ -786,7 +786,7 @@ class DataCollector:
                         "rate": float(fr),
                         "mark_price": None,
                         "interval": 1,
-                        "timestamp": datetime.utcnow()
+                        "timestamp": datetime.now(timezone.utc)
                     })
                 if batch:
                     await self._notify_callbacks(batch)

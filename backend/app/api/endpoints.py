@@ -30,7 +30,7 @@ async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
             result = await session.execute(stmt)
             rows = result.scalars().all()
             if rows:
-                return [{"timestamp": r.timestamp.isoformat(), "rate": r.rate} for r in rows]
+                return [{"timestamp": r.timestamp.replace(tzinfo=timezone.utc).isoformat(), "rate": r.rate} for r in rows]
     except Exception as e:
         logger.debug("db read unavailable", exchange=exchange, symbol=symbol)
     return []
@@ -174,7 +174,7 @@ async def fetch_coinw_history(symbol: str, days: int):
                     if data.get('code') == 0:
                         return [
                             {
-                                "timestamp": datetime.strptime(item['createdDate'], "%Y-%m-%d %H:%M").isoformat(),
+                                "timestamp": datetime.strptime(item['createdDate'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).isoformat(),
                                 "rate": float(item['fundingRate'])
                             } for item in data['data']
                         ]
@@ -292,15 +292,8 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
     if exchange.lower() == "lighter":
         return []
 
-    # DB has the best data (accumulated from collectors) — check first
+    # DB as fallback if live API fails
     db_hist = await get_history_from_db(exchange, symbol, days)
-    if db_hist:
-        try:
-            from backend.app.main import redis
-            if redis:
-                await redis.setex(cache_key, 900, json.dumps(db_hist))
-        except: pass
-        return db_hist
 
     # For Aden: try authenticated API if credentials are configured
     if exchange.lower() == "aden":
@@ -392,7 +385,16 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
     except Exception as e:
         logger.error("history api fetch failed", exchange=exchange, symbol=symbol, error=str(e)[:200])
 
+    # Fallback to DB if live API returned nothing
+    if db_hist:
+        try:
+            from backend.app.main import redis
+            if redis:
+                await redis.setex(cache_key, 900, json.dumps(db_hist))
+        except: pass
+        return db_hist
     return []
+
 
 @router.get("/analysis/spreads")
 async def get_funding_spreads():

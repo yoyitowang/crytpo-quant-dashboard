@@ -90,6 +90,10 @@ async def health_ready():
         ts_list = [r['timestamp'] for r in collector.latest_rates.values() if isinstance(r.get('timestamp'), datetime)]
         if ts_list:
             latest_ts = max(ts_list).isoformat()
+    circuit_states = collector.get_circuit_states()
+    open_circuits = [name for name, st in circuit_states.items() if st == "open"]
+    if open_circuits:
+        issues.append(f"circuit_open: {','.join(open_circuits)}")
     status_code = 200 if not issues else 503
     return Response(
         status_code=status_code,
@@ -98,7 +102,8 @@ async def health_ready():
             "issues": issues,
             "last_update": latest_ts,
             "active_exchanges": list(collector.exchanges.keys()),
-            "symbols_tracked": len(collector.latest_rates)
+            "symbols_tracked": len(collector.latest_rates),
+            "circuit_breakers": circuit_states
         }),
         media_type="application/json"
     )

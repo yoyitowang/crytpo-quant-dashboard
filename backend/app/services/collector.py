@@ -5,6 +5,7 @@ import structlog
 import websockets
 import aiohttp
 import re
+import time
 import ccxt as ccxt_sync
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Callable
@@ -120,6 +121,44 @@ async def async_retry(coro_factory, max_retries=3, base_delay=1.0, max_delay=30.
                 await asyncio.sleep(delay)
     raise last_exc
 
+
+class CircuitBreaker:
+    def __init__(self, name: str, failure_threshold: int = 5, open_duration: int = 300):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.open_duration = open_duration
+        self._failures = 0
+        self._last_failure_time = 0.0
+        self._state = "closed"
+
+    def record_success(self):
+        self._failures = 0
+        self._state = "closed"
+
+    def record_failure(self):
+        self._failures += 1
+        self._last_failure_time = time.time()
+        if self._failures >= self.failure_threshold:
+            self._state = "open"
+
+    @property
+    def is_open(self) -> bool:
+        if self._state == "open":
+            if time.time() - self._last_failure_time > self.open_duration:
+                self._state = "half_open"
+                return False
+            return True
+        return False
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def failures(self) -> int:
+        return self._failures
+
+
 class DataCollector:
     def __init__(self):
         self.exchanges = {
@@ -140,6 +179,7 @@ class DataCollector:
         self.callbacks: List[Callable] = []
         self.latest_rates: Dict[str, Dict[str, Any]] = {}
         self.queue = asyncio.Queue(maxsize=50000)
+        self.circuit_breakers: Dict[str, CircuitBreaker] = {name: CircuitBreaker(name) for name in self.exchanges}
 
     def register_callback(self, callback: Callable):
         self.callbacks.append(callback)
@@ -148,7 +188,7 @@ class DataCollector:
         try:
             items = data if isinstance(data, list) else [data]
             fresh_items = []
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = datetime.now(timezone.utc)
             
             for item in items:
                 settle_time = item.get('settlement_time')
@@ -214,7 +254,11 @@ class DataCollector:
         for name, handler in self.exchanges.items():
             asyncio.create_task(self._safe_handler(name, handler))
         logger.info("Universal Data Processor v19.2 Online.")
-        while True: await asyncio.sleep(3600)
+        while True:
+            await asyncio.sleep(3600)
+
+    def get_circuit_states(self) -> Dict[str, str]:
+        return {name: cb.state for name, cb in self.circuit_breakers.items()}
 
     async def _interval_refresher(self):
         while True:
@@ -222,15 +266,19 @@ class DataCollector:
             await interval_manager.refresh()
 
     async def _safe_handler(self, name: str, handler: Callable):
-        crash_count = 0
+        cb = self.circuit_breakers[name]
         while True:
+            if cb.is_open:
+                logger.warning("circuit_open", name=name, state=cb.state, failures=cb.failures, retry_after=cb.open_duration)
+                await asyncio.sleep(cb.open_duration)
+                continue
             try:
-                crash_count = 0
                 await handler()
+                cb.record_success()
             except Exception as e:
-                crash_count += 1
-                delay = min(10 * (2 ** (crash_count - 1)), 120)
-                logger.error("collector_handler_crashed", name=name, crash_count=crash_count, retry_delay=delay, error=str(e)[:200])
+                cb.record_failure()
+                delay = min(10 * (2 ** (cb.failures - 1)), 120)
+                logger.error("collector_handler_crashed", name=name, crash_count=cb.failures, retry_delay=delay, error=str(e)[:200])
                 await asyncio.sleep(delay)
 
     async def _binance_handler(self):

@@ -10,6 +10,7 @@ import re
 import asyncio
 from datetime import datetime, timedelta, timezone
 import ccxt.async_support as ccxt_async
+import ccxt as ccxt_sync
 from sqlalchemy import select, desc
 
 router = APIRouter()
@@ -201,9 +202,13 @@ async def get_aggregated_history(symbol: str, days: int = 7):
 
     clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
     active_exchanges = []
-    for exch in collector.exchanges.keys():
-        if any(clean_sym in k.upper() for k in collector.latest_rates if exch in k):
-            active_exchanges.append(exch)
+    if collector.latest_rates:
+        for exch in collector.exchanges.keys():
+            if any(clean_sym in k.upper() for k in collector.latest_rates if exch in k):
+                active_exchanges.append(exch)
+
+    if not active_exchanges:
+        active_exchanges = list(collector.exchanges.keys())
 
     async def fetch_with_name(exchange: str) -> tuple[str, list]:
         try:
@@ -349,9 +354,16 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                         break
 
                 if not ccxt_sym:
-                    for s, m in ex.markets.items():
-                        if m.get('swap') and m.get('base') == base and (m.get('quote') == quote or m.get('settle') == quote):
-                            ccxt_sym = s
+                    bases_to_try = [base]
+                    prefix_m = re.match(r'^(1000|10000|1000000|1000000000)(.+)$', base)
+                    if prefix_m:
+                        bases_to_try.append(prefix_m.group(2))
+                    for b in bases_to_try:
+                        for s, mkt in ex.markets.items():
+                            if mkt.get('swap') and mkt.get('base') == b and (mkt.get('quote') == quote or mkt.get('settle') == quote):
+                                ccxt_sym = s
+                                break
+                        if ccxt_sym:
                             break
 
                 if ccxt_sym and ex.has.get('fetchFundingRateHistory'):
@@ -515,9 +527,16 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
                         ccxt_sym = s
                         break
                 if not ccxt_sym:
-                    for s, m in ex.markets.items():
-                        if m.get('swap') and m.get('base') == base and (m.get('quote') == quote or m.get('settle') == quote):
-                            ccxt_sym = s
+                    bases_to_try = [base]
+                    prefix_m = re.match(r'^(1000|10000|1000000|1000000000)(.+)$', base)
+                    if prefix_m:
+                        bases_to_try.append(prefix_m.group(2))
+                    for b in bases_to_try:
+                        for s, mkt in ex.markets.items():
+                            if mkt.get('swap') and mkt.get('base') == b and (mkt.get('quote') == quote or mkt.get('settle') == quote):
+                                ccxt_sym = s
+                                break
+                        if ccxt_sym:
                             break
 
                 if ccxt_sym and ex.has.get('fetchOrderBook'):

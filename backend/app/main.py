@@ -13,6 +13,8 @@ import json
 import structlog
 from datetime import datetime, timezone
 from redis import asyncio as aioredis
+from prometheus_fastapi_instrumentator import Instrumentator
+from backend.app.metrics import ws_active_connections, db_writer_queue_size, collector_circuit_open
 
 structlog.configure(
     processors=[
@@ -97,6 +99,15 @@ async def _db_writer():
                 logger.error("db write error", error=err_str[:200])
 
 
+async def _metrics_loop():
+    while True:
+        await asyncio.sleep(15)
+        ws_active_connections.set(len(ws_manager.active_connections))
+        db_writer_queue_size.set(_db_write_queue.qsize() if _db_write_queue else 0)
+        for name, cb in collector.circuit_breakers.items():
+            collector_circuit_open.labels(exchange=name).set(1 if cb.is_open else 0)
+
+
 async def db_callback(data):
     """Redis + PostgreSQL 寫入"""
     redis = get_redis()
@@ -151,12 +162,14 @@ async def lifespan(app: FastAPI):
     collector.register_callback(db_callback)
     collector.register_callback(ws_callback)
     collector_task = asyncio.create_task(collector.start())
+    asyncio.create_task(_metrics_loop())
     yield
     collector_task.cancel()
     await r.close()
     set_redis(None)
 
 app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
+Instrumentator().instrument(app).expose(app, endpoint="/api/metrics")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.include_router(endpoints.router, prefix="/api")
 

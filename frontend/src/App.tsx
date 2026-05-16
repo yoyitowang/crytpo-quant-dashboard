@@ -116,7 +116,7 @@ function App() {
   const [timeframe, setTimeframe] = useState<number>(7);
   const [visibleExchanges, setVisibleExchanges] = useState<string[]>(ALL_EXCHANGES);
   const [connected, setConnected] = useState(false);
-  const [viewMode, setViewMode] = useState<'matrix' | 'heatplot' | 'calc'>('matrix');
+  const [viewMode, setViewMode] = useState<'matrix' | 'heatplot' | 'calc' | 'watch'>('matrix');
   const [dataMode, setDataMode] = useState<'funding' | 'all' | 'price'>('funding');
   const [search, setSearch] = useState('');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -149,14 +149,13 @@ function App() {
   const [favorites, setFavorites] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('quantmatrix_favorites') || '[]') } catch { return [] }
   });
-  const [showFavOnly, setShowFavOnly] = useState(false);
 
-  // Persist favorites
   useEffect(() => { localStorage.setItem('quantmatrix_favorites', JSON.stringify(favorites)) }, [favorites]);
 
   const toggleFav = (sym: string) => {
     setFavorites(prev => prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym]);
   };
+
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [loadingMulti, setLoadingMulti] = useState(false);
   const [historyCache, setHistoryCache] = useState<Record<string, any>>({});
@@ -374,11 +373,7 @@ function App() {
     });
 
     if (search) result = result.filter(r => r.symbol.toLowerCase().includes(search.toLowerCase()));
-    if (showFavOnly) result = result.filter(r => favorites.includes(r.symbol));
     result.sort((a, b) => {
-        const aFav = favorites.includes(a.symbol) ? 1 : 0;
-        const bFav = favorites.includes(b.symbol) ? 1 : 0;
-        if (aFav !== bFav) return bFav - aFav; // favorites first
         let v1: any, v2: any;
         if (sortConfig.key === 'symbol') { v1 = a.symbol; v2 = b.symbol; }
         else if (sortConfig.key === 'maxApr') { v1 = a.maxApr > 0 ? a.maxApr : undefined; v2 = b.maxApr > 0 ? b.maxApr : undefined; }
@@ -391,7 +386,7 @@ function App() {
         return sortConfig.direction === 'asc' ? res : -res;
     });
     return result;
-  }, [rates, search, selectedExchanges, sortConfig, favorites, showFavOnly]);
+  }, [rates, search, selectedExchanges, sortConfig]);
 
   const currentSymbols = filteredData.slice((page - 1) * pageSize, page * pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
@@ -426,6 +421,7 @@ function App() {
                 <button onClick={() => setViewMode('matrix')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'matrix' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><LayoutGrid size={14}/> Matrix</button>
                 <button onClick={() => setViewMode('heatplot')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'heatplot' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-500'}`}><Grid size={14}/> Heatplot</button>
                 <button onClick={() => setViewMode('calc')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'calc' ? 'bg-purple-600 text-white shadow-lg' : 'text-gray-500'}`}><Calculator size={14}/> Calc</button>
+                <button onClick={() => setViewMode('watch')} className={`px-4 py-1.5 rounded-md text-[10px] font-black uppercase flex items-center gap-2 transition-all ${viewMode === 'watch' ? 'bg-yellow-600 text-white shadow-lg' : 'text-gray-500'}`}><Star size={14}/> Watch</button>
              </div>
              <div className="flex bg-[#111] p-1 rounded-lg border border-gray-800 gap-0.5">
                 <button onClick={() => setDataMode('funding')} className={`px-3 py-1.5 rounded-md text-[10px] font-black uppercase transition-all ${dataMode === 'funding' ? 'bg-green-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}>Funding</button>
@@ -441,9 +437,6 @@ function App() {
             <button onClick={() => setIsAlertPanelOpen(true)} className="relative p-2 rounded-xl border border-gray-800 hover:border-yellow-600/50 hover:text-yellow-500 text-gray-500 transition-all">
               <Bell size={16} />
               {rules.some(r => r.enabled) && <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />}
-            </button>
-            <button onClick={() => setShowFavOnly(!showFavOnly)} className={`p-2 rounded-xl border transition-all ${showFavOnly ? 'bg-yellow-600/20 border-yellow-600/50 text-yellow-500' : 'border-gray-800 text-gray-600 hover:text-gray-400'}`} title={showFavOnly ? 'Show all' : 'Favorites only'}>
-              <Star size={14} className={showFavOnly ? 'fill-yellow-500' : ''} />
             </button>
             <input type="text" placeholder="SEARCH ASSET..." className="bg-[#111] border border-gray-800 rounded-full px-6 py-1.5 text-xs focus:outline-none focus:border-blue-900 w-48 font-bold uppercase" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
@@ -774,6 +767,65 @@ function App() {
         )}
         {viewMode === 'calc' && (
             <ArbitrageCalculator rates={rates} />
+        )}
+        {viewMode === 'watch' && (
+        <div className="bg-[#0a0a0a] rounded-2xl border border-gray-900 overflow-hidden shadow-2xl">
+            {favorites.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 text-center">
+                    <Star size={40} className="text-gray-800 mb-4" />
+                    <p className="text-[10px] font-black text-gray-700 uppercase tracking-widest mb-1">No Watched Symbols</p>
+                    <p className="text-[9px] text-gray-800 font-bold uppercase tracking-wider">Click the ⭐ star icon next to any symbol to add it here</p>
+                </div>
+            ) : (
+                <div>
+                    <div className="px-8 py-4 border-b border-gray-900 flex items-center justify-between">
+                        <div className="text-[10px] font-black text-gray-600 uppercase tracking-widest">Watched Symbols ({favorites.length})</div>
+                    </div>
+                    <div className="overflow-x-auto custom-scrollbar">
+                        <table className="w-full text-left border-collapse table-fixed min-w-[800px]">
+                            <thead>
+                                <tr className="bg-[#0f0f0f] border-b border-gray-800 text-[10px] font-black text-gray-600 uppercase tracking-widest">
+                                    <th className="w-48 px-8 py-6">Symbol</th>
+                                    {selectedExchanges.map(ex => (
+                                        <th key={ex} className="px-2 py-6 text-center border-l border-gray-900/50 uppercase">{ex}</th>
+                                    ))}
+                                    <th className="w-24 px-4 py-6 text-center border-l border-gray-900/50">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-900">
+                                {filteredData.filter(r => favorites.includes(r.symbol)).map(row => (
+                                    <tr key={row.symbol} className="hover:bg-blue-600/[0.03] transition-colors">
+                                        <td className="px-8 py-4 sticky left-0 bg-[#0a0a0a] z-20 border-r border-gray-900 font-black text-white text-sm tracking-tighter">
+                                            <div className="flex items-center gap-2">
+                                                <span>{row.base} <span className="text-[10px] text-gray-700 font-bold">{row.quote}</span></span>
+                                            </div>
+                                        </td>
+                                        {selectedExchanges.map(ex => {
+                                            const rate = row.rates[ex];
+                                            const val = (rate || 0) * 100;
+                                            const opacity = Math.min(Math.abs(val) / 0.05, 1);
+                                            const bg = rate === undefined ? 'transparent' : (val > 0 ? `rgba(16, 185, 129, ${0.1 + opacity * 0.7})` : `rgba(239, 68, 68, ${0.1 + opacity * 0.7})`);
+                                            return (
+                                                <td key={ex} className="p-0 border-l border-gray-900/20">
+                                                    <div style={{ backgroundColor: bg }} className="w-full h-14 flex items-center justify-center cursor-pointer hover:brightness-150 transition-all" onClick={() => { if (rate !== undefined) { setSelectedPair({exchange: ex, symbol: row.symbol}); setTimeframe(7); }}}>
+                                                        <span className={`font-mono text-[11px] font-bold ${rate !== undefined ? 'text-white' : 'text-gray-800/50'}`}>{rate !== undefined ? `${val.toFixed(4)}%` : '--'}</span>
+                                                    </div>
+                                                </td>
+                                            );
+                                        })}
+                                        <td className="px-4 py-4 text-center border-l border-gray-900/20">
+                                            <button onClick={() => toggleFav(row.symbol)} className="text-gray-600 hover:text-yellow-500 transition-colors" title="Remove from watchlist">
+                                                <Star size={14} className="fill-yellow-500 text-yellow-500" />
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+        </div>
         )}
 
         {compareSymbol && (

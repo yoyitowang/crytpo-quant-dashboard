@@ -4,11 +4,11 @@ Set in .env: ADEN_API_USER, ADEN_API_SIGNER, ADEN_API_PRIVATE_KEY
 """
 import time
 import urllib.parse
-import logging
+import structlog
 from datetime import datetime, timezone
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 # Lazy imports (only when auth is configured)
 _eth_account = None
@@ -50,7 +50,7 @@ def init(user: str, signer: str, private_key: str):
         _has_auth = True
         logger.info("Aden API auth initialized")
     except ImportError:
-        logger.warning("eth_account not installed; Aden auth unavailable")
+        logger.warning("eth_account not installed, Aden auth unavailable")
 
 
 def _get_nonce() -> str:
@@ -114,7 +114,7 @@ async def fetch_funding_rate_history(symbol: str, limit: int = 500) -> list:
                         } for d in data if d.get("fundingRate") is not None]
                 else:
                     body = await resp.text()
-                    logger.error(f"Aden history API error {resp.status}: {body[:200]}")
+                    logger.error("aden history api error", status=resp.status, body=body[:200])
     except Exception as e:
-        logger.error(f"Aden history fetch failed: {e}")
+        logger.error("aden history fetch failed", error=str(e)[:200])
     return []

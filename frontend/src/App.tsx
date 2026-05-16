@@ -271,7 +271,7 @@ function App() {
         } catch (e) { console.error("Fetch compressed error", e); }
 
         fetch('/api/analysis/summary').then(res => res.json()).then(setSummary);
-        fetch('/api/health').then(res => res.json()).then(setHealth);
+        fetch('/api/health/ready').then(res => res.json()).then(setHealth);
     };
     fetchData();
     const interval = setInterval(fetchData, 30000); // 延長 API 輪詢間隔，主要靠 WS 更新

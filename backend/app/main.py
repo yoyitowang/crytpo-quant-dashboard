@@ -1,21 +1,31 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.config import settings
 from backend.app.api import endpoints
 from backend.app.services.collector import collector
-from backend.app.models.funding_rate import FundingRate, Base
-from backend.app.db.session import SessionLocal, engine
+from backend.app.models.funding_rate import FundingRate
+from backend.app.db.session import SessionLocal
 from backend.app.services.websocket_manager import ws_manager
 from redis import asyncio as aioredis
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
-import logging
+import structlog
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer() if settings.ENV == "dev" else structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+logger = structlog.get_logger()
 
 redis: aioredis.Redis = None
 local_rate_cache = {}
@@ -25,17 +35,28 @@ _db_enabled = False
 
 
 async def _init_db():
-    """Initialize PostgreSQL schema: drop old table if exists, create fresh."""
+    """Apply Alembic migrations on startup. Never drops data."""
+    from alembic.config import Config
+    from alembic.command import upgrade, stamp
+    alembic_cfg = Config("backend/alembic.ini")
     try:
-        async with engine.begin() as conn:
-            # Drop old table (safe: data accumulates from collectors)
-            await conn.execute(text("DROP TABLE IF EXISTS funding_rates CASCADE"))
-            await conn.run_sync(Base.metadata.create_all)
-            logger.info("PostgreSQL table initialized (funding_interval)")
+        await asyncio.wait_for(
+            asyncio.to_thread(upgrade, alembic_cfg, "head"),
+            timeout=15
+        )
+        logger.info("database schema up to date (alembic migration applied)")
         return True
     except Exception as e:
-        logger.warning(f"PostgreSQL init failed: {e}")
-        return False
+        logger.warning("migration upgrade failed, trying stamp head", error=str(e)[:200])
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(stamp, alembic_cfg, "head"),
+                timeout=10
+            )
+            logger.info("database schema stamped (existing schema matches migration)")
+        except Exception as e2:
+            logger.error("database migration completely failed", error=str(e2)[:200])
+        return True
 
 
 async def _db_writer():
@@ -61,16 +82,19 @@ async def _db_writer():
             if batch:
                 async with SessionLocal() as session:
                     stmt = pg_insert(FundingRate).values(batch)
-                    stmt = stmt.on_conflict_do_nothing()
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="funding_rates_pkey",
+                        set_={"rate": stmt.excluded.rate, "funding_interval": stmt.excluded.funding_interval, "settlement_time": stmt.excluded.settlement_time}
+                    )
                     await session.execute(stmt)
                     await session.commit()
         except Exception as e:
             err_str = str(e)
             if "no partition" in err_str or "does not exist" in err_str or "UndefinedColumn" in err_str:
-                logger.error(f"DB schema error — disabling DB writes: {err_str[:200]}")
+                logger.error("db schema error — disabling writes", error=err_str[:200])
                 _db_enabled = False
             else:
-                logger.error(f"DB write error: {err_str[:200]}")
+                logger.error("db write error", error=err_str[:200])
 
 
 async def db_callback(data):

@@ -1,10 +1,10 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Response
 from backend.app.services.collector import collector
 from backend.app.services.websocket_manager import ws_manager
 from backend.app.db.session import SessionLocal
 from backend.app.models.funding_rate import FundingRate
 from typing import List
-import logging
+import structlog
 import json
 import re
 import asyncio
@@ -13,7 +13,7 @@ import ccxt.async_support as ccxt_async
 from sqlalchemy import select, desc
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
     """Query funding rate history from local PostgreSQL (fast, no external API)."""
@@ -31,7 +31,7 @@ async def get_history_from_db(exchange: str, symbol: str, days: int) -> list:
             if rows:
                 return [{"timestamp": r.timestamp.isoformat(), "rate": r.rate} for r in rows]
     except Exception as e:
-        logger.debug(f"DB read unavailable ({exchange}/{symbol}): {e}")
+        logger.debug("db read unavailable", exchange=exchange, symbol=symbol)
     return []
 
 @router.get("/rates/compressed")
@@ -62,23 +62,44 @@ async def get_compressed_rates():
             ])
         return compressed
     except Exception as e:
-        logger.error(f"Compressed Rates Error: {e}")
+        logger.error("compressed rates error", error=str(e)[:200])
         return []
 
-@router.get("/health")
-async def health_check():
+@router.get("/health/live")
+async def health_live():
+    return Response(status_code=200, content="ok")
+
+@router.get("/health/ready")
+async def health_ready():
+    from backend.app.main import redis
+    issues = []
+    if redis is None:
+        issues.append("redis unavailable")
+    else:
+        try:
+            await redis.ping()
+        except Exception:
+            issues.append("redis unreachable")
+    from backend.app.main import _db_enabled
+    if not _db_enabled:
+        issues.append("db writes disabled")
     latest_ts = "None"
     if collector.latest_rates:
         ts_list = [r['timestamp'] for r in collector.latest_rates.values() if isinstance(r.get('timestamp'), datetime)]
         if ts_list:
             latest_ts = max(ts_list).isoformat()
-            
-    return {
-        "status": "ok",
-        "last_update": latest_ts,
-        "active_exchanges": list(collector.exchanges.keys()),
-        "symbols_tracked": len(collector.latest_rates)
-    }
+    status_code = 200 if not issues else 503
+    return Response(
+        status_code=status_code,
+        content=json.dumps({
+            "status": "ok" if not issues else "degraded",
+            "issues": issues,
+            "last_update": latest_ts,
+            "active_exchanges": list(collector.exchanges.keys()),
+            "symbols_tracked": len(collector.latest_rates)
+        }),
+        media_type="application/json"
+    )
 
 @router.get("/rates/latest")
 async def get_latest_rates():
@@ -90,7 +111,7 @@ async def get_latest_rates():
         rates_json = await redis.mget(keys)
         return [json.loads(r) for r in rates_json if r]
     except Exception as e:
-        logger.error(f"Error fetching latest: {e}")
+        logger.error("error fetching latest", error=str(e)[:200])
         return []
 
 @router.get("/analysis/summary")
@@ -131,7 +152,7 @@ async def get_market_summary():
             "total_symbols": len(all_rates)
         }
     except Exception as e:
-        logger.error(f"Summary Error: {e}")
+        logger.error("summary error", error=str(e)[:200])
         return {}
 
 import aiohttp
@@ -157,7 +178,7 @@ async def fetch_coinw_history(symbol: str, days: int):
                             } for item in data['data']
                         ]
     except Exception as e:
-        logger.error(f"CoinW History API Error: {e}")
+        logger.error("coinw history api error", error=str(e)[:200])
     return []
 
 @router.get("/rates/history_all/{symbol}")
@@ -176,7 +197,7 @@ async def get_aggregated_history(symbol: str, days: int = 7):
             if cached:
                 return json.loads(cached)
     except Exception as e:
-        logger.error(f"Redis Read Error (history_all): {e}")
+        logger.error("redis read error (history_all)", error=str(e)[:200])
 
     clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
     active_exchanges = []
@@ -192,10 +213,10 @@ async def get_aggregated_history(symbol: str, days: int = 7):
             )
             return exchange, data
         except asyncio.TimeoutError:
-            logger.warning(f"History timeout: {exchange}/{symbol}")
+            logger.warning("history timeout", exchange=exchange, symbol=symbol)
             return exchange, []
         except Exception as e:
-            logger.error(f"History failed: {exchange}/{symbol}: {e}")
+            logger.error("history failed", exchange=exchange, symbol=symbol, error=str(e)[:200])
             return exchange, []
 
     tasks = [fetch_with_name(ex) for ex in active_exchanges]
@@ -214,7 +235,7 @@ async def get_aggregated_history(symbol: str, days: int = 7):
         if redis and result:
             await redis.setex(cache_key, 900, json.dumps(response))
     except Exception as e:
-        logger.error(f"Redis Write Error (history_all): {e}")
+        logger.error("redis write error (history_all)", error=str(e)[:200])
 
     return response
 
@@ -229,7 +250,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
             if cached:
                 return json.loads(cached)
     except Exception as e:
-        logger.error(f"Redis Read Error (history): {e}")
+        logger.error("redis read error (history)", error=str(e)[:200])
 
     if exchange.lower() == "coinw":
         res = await fetch_coinw_history(symbol, days)
@@ -260,7 +281,7 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                                 await redis.setex(cache_key, 900, json.dumps(res))
                             return res
         except Exception as e:
-            logger.error(f"AsterDEX history failed: {e}")
+            logger.error("asterdex history failed", error=str(e)[:200])
         return []
 
     if exchange.lower() == "lighter":
@@ -281,7 +302,8 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
         from backend.app.core.config import settings
         if settings.aden_auth_available:
             from backend.app.services.aden_api import init, fetch_funding_rate_history
-            init(settings.ADEN_API_USER, settings.ADEN_API_SIGNER, settings.ADEN_API_PRIVATE_KEY)
+            priv_key = settings.ADEN_API_PRIVATE_KEY.get_secret_value() if settings.ADEN_API_PRIVATE_KEY else ""
+            init(settings.ADEN_API_USER, settings.ADEN_API_SIGNER, priv_key)
             res = await fetch_funding_rate_history(symbol, limit=500)
             if res:
                 res.sort(key=lambda x: x['timestamp'])
@@ -352,11 +374,11 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                         except: pass
                         return res
 
-                logger.warning(f"History Fetch: {ex_id} ({symbol}) -> CCXT Sym: {ccxt_sym} | Found: {ccxt_sym in ex.markets if ccxt_sym else False}")
+                logger.warning("history fetch result", ex_id=ex_id, symbol=symbol, ccxt_sym=ccxt_sym, found=ccxt_sym in ex.markets if ccxt_sym else False)
             finally:
                 await ex.close()
     except Exception as e:
-        logger.error(f"History API fetch failed for {exchange} ({symbol}): {e}")
+        logger.error("history api fetch failed", exchange=exchange, symbol=symbol, error=str(e)[:200])
 
     return []
 
@@ -444,7 +466,7 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
                             "asks": [[round(float(a[0]), 6), round(float(a[1]), 4)] for a in asks[:10]],
                         }
         except Exception as e:
-            logger.error(f"Aden orderbook failed: {e}")
+            logger.error("aden orderbook failed", error=str(e)[:200])
             return {"error": f"Aden orderbook: {e}"}
 
     # CoinW: use CCXT if available, otherwise REST
@@ -465,7 +487,7 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
                 "asks": [[round(a[0], 6), round(a[1], 4)] for a in asks[:10]],
             }
         except Exception as e:
-            logger.error(f"CoinW orderbook failed: {e}")
+            logger.error("coinw orderbook failed", error=str(e)[:200])
             return {"error": f"CoinW orderbook: {e}"}
 
     try:
@@ -522,7 +544,7 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
             finally:
                 await ex.close()
     except Exception as e:
-        logger.error(f"Orderbook fetch failed: {exchange}/{symbol}: {e}")
+        logger.error("orderbook fetch failed", exchange=exchange, symbol=symbol, error=str(e)[:200])
         return {"error": str(e)}
 
     return {"error": "unsupported exchange"}

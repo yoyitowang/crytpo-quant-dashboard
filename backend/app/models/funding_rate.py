@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Index
+from sqlalchemy import Column, Integer, String, Float, DateTime, Index, text
 from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime
 
@@ -11,9 +11,11 @@ class FundingRate(Base):
     exchange = Column(String, primary_key=True)
     symbol = Column(String, primary_key=True)
     timestamp = Column(DateTime, primary_key=True, default=datetime.utcnow)
-    
+
     rate = Column(Float)
     funding_interval = Column(Integer, default=8)
     settlement_time = Column(DateTime)
 
-Index('idx_funding_lookup', FundingRate.exchange, FundingRate.symbol, FundingRate.timestamp.desc())
+    __table_args__ = (
+        Index("idx_funding_lookup", "exchange", "symbol", text("timestamp DESC")),
+    )

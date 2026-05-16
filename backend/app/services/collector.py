@@ -1,6 +1,7 @@
 import asyncio
 import json
-import logging
+import random
+import structlog
 import websockets
 import aiohttp
 import re
@@ -8,8 +9,7 @@ import ccxt as ccxt_sync
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Callable
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 class IntervalManager:
     def __init__(self):
@@ -25,7 +25,7 @@ class IntervalManager:
                         d = await resp.json()
                         self.intervals['binance'] = {i['symbol']: int(i.get('fundingIntervalHours', 8)) for i in d}
                 except Exception as e:
-                    logger.error(f"Binance Interval Refresh Failed: {e}")
+                    logger.error("binance_interval_refresh_failed", error=str(e)[:200])
 
                 # Bybit
                 try:
@@ -33,7 +33,7 @@ class IntervalManager:
                         d = await resp.json()
                         self.intervals['bybit'] = {i['symbol']: int(i.get('fundingInterval', 480)) // 60 for i in d['result']['list']}
                 except Exception as e:
-                    logger.error(f"Bybit Interval Refresh Failed: {e}")
+                    logger.error("bybit_interval_refresh_failed", error=str(e)[:200])
 
                 # Bitget
                 try:
@@ -42,7 +42,7 @@ class IntervalManager:
                         if d.get('code') == '00000':
                             self.intervals['bitget'] = {i['symbol']: int(i.get('fundInterval', 8)) for i in d['data']}
                 except Exception as e:
-                    logger.error(f"Bitget Interval Refresh Failed: {e}")
+                    logger.error("bitget_interval_refresh_failed", error=str(e)[:200])
 
                 # Gate
                 try:
@@ -50,7 +50,7 @@ class IntervalManager:
                         d = await resp.json()
                         self.intervals['gate'] = {i['name']: int(i.get('funding_interval', 28800)) // 3600 for i in d}
                 except Exception as e:
-                    logger.error(f"Gate Interval Refresh Failed: {e}")
+                    logger.error("gate_interval_refresh_failed", error=str(e)[:200])
 
                 # CoinW
                 try:
@@ -60,7 +60,7 @@ class IntervalManager:
                             # Normalize CoinW symbols to match collector (BTCUSDT)
                             self.intervals['coinw'] = {i['base'].upper() + "USDT": int(i.get('settledPeriod', 8)) for i in d['data']}
                 except Exception as e:
-                    logger.error(f"CoinW Interval Refresh Failed: {e}")
+                    logger.error("coinw_interval_refresh_failed", error=str(e)[:200])
 
                 # MEXC
                 try:
@@ -69,7 +69,7 @@ class IntervalManager:
                         if d.get('success'):
                             self.intervals['mexc'] = {i['symbol']: int(i.get('collectCycle', 8)) for i in d['data']}
                 except Exception as e:
-                    logger.error(f"MEXC Interval Refresh Failed: {e}")
+                    logger.error("mexc_interval_refresh_failed", error=str(e)[:200])
 
                 # KuCoin
                 try:
@@ -78,7 +78,7 @@ class IntervalManager:
                         if d.get('code') == '200000':
                             self.intervals['kucoin'] = {i['symbol']: int(i.get('fundingRateGranularity') or 28800000) // 3600000 for i in d['data']}
                 except Exception as e:
-                    logger.error(f"KuCoin Interval Refresh Failed: {e}")
+                    logger.error("kucoin_interval_refresh_failed", error=str(e)[:200])
 
                 # BingX
                 try:
@@ -87,9 +87,9 @@ class IntervalManager:
                         if d.get('code') == 0:
                             self.intervals['bingx'] = {i['symbol']: int(i.get('fundingIntervalHours', 8)) for i in d['data']}
                 except Exception as e:
-                    logger.error(f"BingX Interval Refresh Failed: {e}")
+                    logger.error("bingx_interval_refresh_failed", error=str(e)[:200])
 
-        logger.info(f"Interval Map Refreshed. (Binance: {len(self.intervals.get('binance', {}))}, Bybit: {len(self.intervals.get('bybit', {}))}, Bitget: {len(self.intervals.get('bitget', {}))}, MEXC: {len(self.intervals.get('mexc', {}))})")
+        logger.info("interval_map_refreshed", binance=len(self.intervals.get('binance', {})), bybit=len(self.intervals.get('bybit', {})), bitget=len(self.intervals.get('bitget', {})), mexc=len(self.intervals.get('mexc', {})))
 
     def get(self, exchange: str, symbol: str) -> int:
         exch = exchange.lower().strip()
@@ -106,6 +106,19 @@ class IntervalManager:
         return ex_map.get(symbol, ex_map.get(clean_sym, 8))
 
 interval_manager = IntervalManager()
+
+async def async_retry(coro_factory, max_retries=3, base_delay=1.0, max_delay=30.0):
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                delay = min(base_delay * (2 ** attempt) + random.uniform(0, 0.5), max_delay)
+                logger.warning("retry_after_error", attempt=attempt + 1, delay=delay, error=str(e)[:100])
+                await asyncio.sleep(delay)
+    raise last_exc
 
 class DataCollector:
     def __init__(self):
@@ -143,7 +156,7 @@ class DataCollector:
                     if settle_time < now:
                         exch = item.get('exchange', '?')
                         sym = item.get('symbol', '?')
-                        logger.warning(f"Settlement expired: {exch} {sym}, settle={settle_time}")
+                        logger.warning("settlement_expired", exchange=exch, symbol=sym, settlement_time=settle_time)
                         continue
                 
                 exch = item['exchange']
@@ -153,7 +166,7 @@ class DataCollector:
             
             if not fresh_items:
                 if isinstance(data, list) and len(items) > 0:
-                    logger.warning(f"All {len(items)} items filtered out in notify_callbacks")
+                    logger.warning("all_items_filtered_in_notify_callbacks", count=len(items))
                 return
 
             msg = fresh_items if isinstance(data, list) else fresh_items[0]
@@ -164,7 +177,7 @@ class DataCollector:
                 self.queue.put_nowait(msg)
             except: pass
         except Exception as e:
-            logger.error(f"Notify Error: {e}")
+            logger.error("notify_error", error=str(e)[:200])
 
     async def _worker(self):
         while True:
@@ -185,12 +198,12 @@ class DataCollector:
                                 if asyncio.iscoroutinefunction(callback): asyncio.create_task(callback(item))
                                 else: callback(item)
                             except Exception as cb_err:
-                                logger.error(f"Callback error for {key}: {cb_err}")
+                                logger.error("callback_error", key=key, error=str(cb_err)[:200])
                     except Exception as item_err:
-                        logger.error(f"Worker item processing error: {item_err} | item keys={list(item.keys()) if isinstance(item, dict) else type(item)}")
+                        logger.error("worker_item_processing_error", error=str(item_err)[:200], item_keys=list(item.keys()) if isinstance(item, dict) else str(type(item)))
                 self.queue.task_done()
             except Exception as e:
-                logger.error(f"Worker fatal error: {e}")
+                logger.error("worker_fatal_error", error=str(e)[:200])
                 await asyncio.sleep(1)
 
     async def start(self):
@@ -209,11 +222,16 @@ class DataCollector:
             await interval_manager.refresh()
 
     async def _safe_handler(self, name: str, handler: Callable):
+        crash_count = 0
         while True:
-            try: await handler()
+            try:
+                crash_count = 0
+                await handler()
             except Exception as e:
-                logger.error(f"Collector {name} crashed: {e}")
-                await asyncio.sleep(20)
+                crash_count += 1
+                delay = min(10 * (2 ** (crash_count - 1)), 120)
+                logger.error("collector_handler_crashed", name=name, crash_count=crash_count, retry_delay=delay, error=str(e)[:200])
+                await asyncio.sleep(delay)
 
     async def _binance_handler(self):
         url = "https://fapi.binance.com/fapi/v1/premiumIndex"
@@ -235,7 +253,7 @@ class DataCollector:
                         await self._notify_callbacks(batch)
                     await asyncio.sleep(30)
                 except Exception as e:
-                    logger.error(f"Binance Handler Failed: {e}")
+                    logger.error("binance_handler_failed", error=str(e)[:200])
                     await asyncio.sleep(10)
 
     async def _coinw_handler(self):
@@ -259,7 +277,7 @@ class DataCollector:
                 
                 return ["BTC", "ETH", "SOL", "CHIP", "LUNC", "DOGE", "PEPE"]
             except Exception as e:
-                logger.error(f"CoinW Discovery failed: {e}")
+                logger.error("coinw_discovery_failed", error=str(e)[:200])
                 return ["BTC", "ETH", "SOL", "CHIP", "LUNC", "DOGE", "PEPE"]
 
         async def poll_task(pairs):
@@ -272,7 +290,7 @@ class DataCollector:
                             try:
                                 async with session.get(url, timeout=5) as resp:
                                     if resp.status == 429:
-                                        logger.warning(f"CoinW rate limited, backing off 5s")
+                                        logger.warning("coinw_rate_limited")
                                         await asyncio.sleep(5)
                                         continue
                                     if resp.status != 200:
@@ -288,16 +306,16 @@ class DataCollector:
                                             "timestamp": datetime.utcnow()
                                         })
                             except Exception as req_err:
-                                logger.debug(f"CoinW poll skip {p}: {req_err}")
+                                logger.debug("coinw_poll_skip", symbol=p, error=str(req_err)[:200])
                             await asyncio.sleep(0.5)
                         await asyncio.sleep(600)
                     except Exception as e:
-                        logger.error(f"CoinW Polling Error: {e}")
+                        logger.error("coinw_polling_error", error=str(e)[:200])
                         await asyncio.sleep(30)
 
         pairs = await get_all_futures()
         if "CHIP" not in pairs: pairs.append("CHIP")
-        logger.info(f"CoinW Discovery Success: {len(pairs)} pairs. Starting WS & Polling.")
+        logger.info("coinw_discovery_success", count=len(pairs))
         
         # 啟動補位輪詢
         asyncio.create_task(poll_task(pairs))
@@ -412,7 +430,7 @@ class DataCollector:
                                 "timestamp": datetime.utcnow()
                             })
                     if batch: await self._notify_callbacks(batch)
-            except Exception as e: logger.error(f"Bybit Initial Fetch Failed: {e}")
+            except Exception as e: logger.error("bybit_initial_fetch_failed", error=str(e)[:200])
         async with websockets.connect(url, ping_interval=20) as ws:
             for i in range(0, len(all_symbols), 100):
                 batch = all_symbols[i:i+100]
@@ -535,7 +553,7 @@ class DataCollector:
                                 "timestamp": datetime.utcnow()
                             })
                     if batch: await self._notify_callbacks(batch)
-            except Exception as e: logger.error(f"Bitget Initial Fetch Failed: {e}")
+            except Exception as e: logger.error("bitget_initial_fetch_failed", error=str(e)[:200])
         
         async with websockets.connect(url, ping_interval=15) as ws:
             for i in range(0, len(all_symbols), 100):
@@ -578,7 +596,7 @@ class DataCollector:
                                 "settlement_time": None, "timestamp": datetime.utcnow()
                             })
                     if batch: await self._notify_callbacks(batch)
-            except Exception as e: logger.error(f"Gate Initial Fetch Failed: {e}")
+            except Exception as e: logger.error("gate_initial_fetch_failed", error=str(e)[:200])
         
         async with websockets.connect(url, ping_interval=20) as ws:
             for i in range(0, len(all_symbols), 100):
@@ -621,9 +639,9 @@ class DataCollector:
                             data = await resp.json()
                             if not inventory_logged:
                                 names = sorted([x['name'] for x in data if x.get('name')])
-                                logger.info(f"Aden Inventory ({len(names)} contracts via api.aden.io):")
+                                logger.info("aden_inventory", count=len(names))
                                 for n in names:
-                                    logger.info(f"  Aden: {n}")
+                                    logger.info("aden_contract", contract=n)
                                 inventory_logged = True
 
                             batch = []
@@ -633,7 +651,7 @@ class DataCollector:
                                     continue
                                 rate = item.get('funding_rate')
                                 if rate is None:
-                                    logger.warning(f"Aden {name}: missing funding_rate, skipping")
+                                    logger.warning("aden_missing_funding_rate", symbol=name)
                                     continue
                                 mark_price = item.get('mark_price')
                                 interval = int(item.get('funding_interval', 28800)) // 3600
@@ -654,7 +672,7 @@ class DataCollector:
                                 logger.warning("Aden: empty batch after processing")
                     await asyncio.sleep(30)
                 except Exception as e:
-                    logger.error(f"Aden Handler Failed: {e}")
+                    logger.error("aden_handler_failed", error=str(e)[:200])
                     await asyncio.sleep(15)
 
     async def _hyperliquid_handler(self):
@@ -691,7 +709,7 @@ class DataCollector:
                                 await self._notify_callbacks(batch)
                     await asyncio.sleep(30)
                 except Exception as e:
-                    logger.error(f"Hyperliquid Handler Failed: {e}")
+                    logger.error("hyperliquid_handler_failed", error=str(e)[:200])
                     await asyncio.sleep(15)
 
     async def _asterdex_handler(self):
@@ -742,7 +760,7 @@ class DataCollector:
                             await self._notify_callbacks(batch)
                     await asyncio.sleep(30)
                 except Exception as e:
-                    logger.error(f"AsterDEX Handler Failed: {e}")
+                    logger.error("asterdex_handler_failed", error=str(e)[:200])
                     await asyncio.sleep(15)
 
     async def _lighter_handler(self):
@@ -774,7 +792,7 @@ class DataCollector:
                     await self._notify_callbacks(batch)
                 await asyncio.sleep(30)
             except Exception as e:
-                logger.error(f"Lighter Handler Failed: {e}")
+                logger.error("lighter_handler_failed", error=str(e)[:200])
                 await asyncio.sleep(15)
 
 collector = DataCollector()

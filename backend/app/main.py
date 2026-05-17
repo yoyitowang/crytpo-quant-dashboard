@@ -11,8 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import structlog
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from redis import asyncio as aioredis
+from redis.exceptions import ReadOnlyError
 from prometheus_fastapi_instrumentator import Instrumentator
 from backend.app.metrics import ws_active_connections, db_writer_queue_size, collector_circuit_open
 
@@ -107,6 +108,16 @@ async def _metrics_loop():
         for name, cb in collector.circuit_breakers.items():
             collector_circuit_open.labels(exchange=name).set(1 if cb.is_open else 0)
 
+        redis = get_redis()
+        if redis is None:
+            try:
+                r = aioredis.from_url(f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}", decode_responses=True, socket_connect_timeout=3)
+                await r.ping()
+                set_redis(r)
+                logger.info("redis_reconnected")
+            except Exception:
+                pass
+
 
 async def db_callback(data):
     """Redis + PostgreSQL 寫入"""
@@ -129,17 +140,27 @@ async def db_callback(data):
             redis_data['timestamp'] = redis_data['timestamp'].isoformat()
         mset_data[key] = json.dumps(redis_data)
 
+        settle = item.get('settlement_time')
+        interval = item.get('interval', 8)
+        db_ts = settle - timedelta(hours=interval) if isinstance(settle, datetime) else datetime.now(timezone.utc)
+
         db_rows.append({
             "exchange": exch,
             "symbol": sym,
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": db_ts,
             "rate": float(item['rate']),
-            "funding_interval": item.get('interval', 8),
-            "settlement_time": item.get('settlement_time') if isinstance(item.get('settlement_time'), datetime) else None,
+            "funding_interval": interval,
+            "settlement_time": settle if isinstance(settle, datetime) else None,
         })
 
     if mset_data:
-        await redis.mset(mset_data)
+        try:
+            await redis.mset(mset_data)
+        except ReadOnlyError:
+            logger.error("redis_readonly — clearing connection, ws + db still work")
+            set_redis(None)
+        except Exception as e:
+            logger.error("redis_mset_failed", error=str(e)[:200])
 
     if _db_write_queue is not None:
         for row in db_rows:

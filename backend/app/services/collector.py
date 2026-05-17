@@ -275,6 +275,9 @@ class DataCollector:
             try:
                 await handler()
                 cb.record_success()
+            except websockets.ConnectionClosed:
+                logger.info("ws_reconnect", name=name)
+                await asyncio.sleep(1)
             except Exception as e:
                 cb.record_failure()
                 delay = min(10 * (2 ** (cb.failures - 1)), 120)
@@ -299,10 +302,10 @@ class DataCollector:
                             "settlement_time": datetime.fromtimestamp(item['nextFundingTime'] / 1000, tz=timezone.utc), "timestamp": datetime.now(timezone.utc)
                         } for item in data if item.get('symbol') in trading_syms and item.get('nextFundingTime', 0) > 1000000000000]
                         await self._notify_callbacks(batch)
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
                 except Exception as e:
                     logger.error("binance_handler_failed", error=str(e)[:200])
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(10 + random.uniform(-2, 2))
 
     async def _coinw_handler(self):
         # --- 核心：探測與輪詢輔助 ---
@@ -329,7 +332,7 @@ class DataCollector:
                 return ["BTC", "ETH", "SOL", "CHIP", "LUNC", "DOGE", "PEPE"]
 
         async def poll_task(pairs):
-            """補足 WS 可能漏掉的數據，每 10 分鐘全面輪詢一次"""
+            """補足 WS 可能漏掉的數據，每 15 分鐘全面輪詢一次"""
             async with aiohttp.ClientSession() as session:
                 while True:
                     try:
@@ -355,11 +358,11 @@ class DataCollector:
                                         })
                             except Exception as req_err:
                                 logger.debug("coinw_poll_skip", symbol=p, error=str(req_err)[:200])
-                            await asyncio.sleep(0.5)
-                        await asyncio.sleep(600)
+                            await asyncio.sleep(1.2)
+                        await asyncio.sleep(900)
                     except Exception as e:
                         logger.error("coinw_polling_error", error=str(e)[:200])
-                        await asyncio.sleep(30)
+                        await asyncio.sleep(30 + random.uniform(-5, 5))
 
         pairs = await get_all_futures()
         if "CHIP" not in pairs: pairs.append("CHIP")
@@ -380,7 +383,14 @@ class DataCollector:
             
             mark_prices = {}
             while True:
-                msg = await ws.recv()
+                try:
+                    msg = await ws.recv()
+                except websockets.ConnectionClosedOK:
+                    logger.info("coinw_ws_closed_normally, reconnecting")
+                    return
+                except websockets.ConnectionClosedError as e:
+                    logger.warning("coinw_ws_closed_abnormally", error=str(e)[:200])
+                    return
                 data = json.loads(msg)
                 msg_type = data.get("type", "")
                 
@@ -515,8 +525,8 @@ class DataCollector:
                                         "settlement_time": datetime.fromtimestamp(item['nextFundingRateDateTime'] / 1000, tz=timezone.utc) if item.get('nextFundingRateDateTime') else None, 
                                         "timestamp": datetime.now(timezone.utc)
                                     })
-                    await asyncio.sleep(30)
-                except: await asyncio.sleep(10)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
+                except: await asyncio.sleep(10 + random.uniform(-2, 2))
 
     async def _mexc_handler(self):
         url = "https://contract.mexc.com/api/v1/contract/funding_rate"
@@ -551,8 +561,8 @@ class DataCollector:
                                         "interval": int(item.get('collectCycle', 8)),
                                         "timestamp": datetime.now(timezone.utc)
                                     })
-                    await asyncio.sleep(30)
-                except: await asyncio.sleep(15)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
+                except: await asyncio.sleep(15 + random.uniform(-3, 3))
 
     async def _bingx_handler(self):
         async with aiohttp.ClientSession() as session:
@@ -575,8 +585,8 @@ class DataCollector:
                                         "interval": int(item.get('fundingIntervalHours', 8)),
                                         "timestamp": datetime.now(timezone.utc)
                                     })
-                    await asyncio.sleep(30)
-                except: await asyncio.sleep(15)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
+                except: await asyncio.sleep(15 + random.uniform(-3, 3))
 
     async def _bitget_handler(self):
         url = "wss://ws.bitget.com/v2/ws/public"
@@ -603,7 +613,7 @@ class DataCollector:
                     if batch: await self._notify_callbacks(batch)
             except Exception as e: logger.error("bitget_initial_fetch_failed", error=str(e)[:200])
         
-        async with websockets.connect(url, ping_interval=15, open_timeout=30) as ws:
+        async with websockets.connect(url, ping_interval=25, open_timeout=30) as ws:
             for i in range(0, len(all_symbols), 100):
                 batch = all_symbols[i:i+100]
                 await ws.send(json.dumps({"op": "subscribe", "args": [{"instType": "USDT-FUTURES", "channel": "ticker", "instId": s} for s in batch]}))
@@ -718,10 +728,10 @@ class DataCollector:
                                 await self._notify_callbacks(batch)
                             else:
                                 logger.warning("Aden: empty batch after processing")
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
                 except Exception as e:
                     logger.error("aden_handler_failed", error=str(e)[:200])
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(15 + random.uniform(-3, 3))
 
     async def _hyperliquid_handler(self):
         """Hyperliquid DEX — REST API: POST /info with type=metaAndAssetCtxs
@@ -755,10 +765,10 @@ class DataCollector:
                                 })
                             if batch:
                                 await self._notify_callbacks(batch)
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
                 except Exception as e:
                     logger.error("hyperliquid_handler_failed", error=str(e)[:200])
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(15 + random.uniform(-3, 3))
 
     async def _asterdex_handler(self):
         """AsterDEX DEX — REST API: GET /fapi/v3/premiumIndex (Binance-variant API)
@@ -806,10 +816,10 @@ class DataCollector:
                             })
                         if batch:
                             await self._notify_callbacks(batch)
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(30 + random.uniform(-5, 5))
                 except Exception as e:
                     logger.error("asterdex_handler_failed", error=str(e)[:200])
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(15 + random.uniform(-3, 3))
 
     async def _lighter_handler(self):
         """Lighter DEX — via CCXT (public, no API key needed).
@@ -838,9 +848,9 @@ class DataCollector:
                     })
                 if batch:
                     await self._notify_callbacks(batch)
-                await asyncio.sleep(30)
+                await asyncio.sleep(30 + random.uniform(-5, 5))
             except Exception as e:
                 logger.error("lighter_handler_failed", error=str(e)[:200])
-                await asyncio.sleep(15)
+                await asyncio.sleep(15 + random.uniform(-3, 3))
 
 collector = DataCollector()

@@ -11,7 +11,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - db_backup:/backup
-    command: postgres -c shared_buffers=512MB -c max_connections=200 -c effective_cache_size=2GB
+      - ./db/init:/docker-entrypoint-initdb.d
+      - ./db/pg_hba.conf:/etc/postgresql/custom_pg_hba.conf:ro
+    command: postgres -c hba_file=/etc/postgresql/custom_pg_hba.conf -c shared_buffers=512MB -c max_connections=200 -c effective_cache_size=2GB
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s

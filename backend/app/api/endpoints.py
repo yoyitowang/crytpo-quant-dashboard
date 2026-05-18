@@ -1,10 +1,10 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Response
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Response, Query
 from backend.app.services.collector import collector
 from backend.app.services.websocket_manager import ws_manager
 from backend.app.db.session import SessionLocal
 from backend.app.models.funding_rate import FundingRate
-from backend.app.dependencies import get_redis
-from typing import List
+from backend.app.dependencies import get_redis, get_symbol_inventory
+from typing import Dict, List, Optional
 import structlog
 import json
 import re
@@ -13,6 +13,66 @@ from datetime import datetime, timedelta, timezone
 import ccxt.async_support as ccxt_async
 import ccxt as ccxt_sync
 from sqlalchemy import select, desc
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+_HISTORY_CACHE_TTL = 3600  # 1 hour — history data does not change
+
+
+def _deduplicate_settlement(data: list) -> list:
+    """Keep only one data point per (year, month, day, hour) bucket.
+    This ensures only settlement-time rates are stored (one per funding period).
+    For 1h, 4h, 8h funding intervals, each settlement falls in a distinct hour bucket.
+    Sorts by timestamp first so the latest entry per bucket wins.
+    """
+    if not data:
+        return []
+    buckets: Dict[str, dict] = {}
+    sorted_data = sorted(data, key=lambda x: x.get("timestamp", ""))
+    for item in sorted_data:
+        ts_str = item["timestamp"]
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        key = dt.strftime("%Y-%m-%dT%H")
+        buckets[key] = item
+    return list(buckets.values())
+
+
+async def _store_history_batch(exchange: str, symbol: str, data: list):
+    """Upsert history funding rate data to PostgreSQL for persistent storage.
+    Primary key: (exchange, symbol, timestamp) — conflicts update the rate.
+    """
+    if not data:
+        return
+    clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
+    rows = []
+    for item in _deduplicate_settlement(data):
+        ts_str = item["timestamp"]
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        rows.append({
+            "exchange": exchange.lower(),
+            "symbol": clean_sym,
+            "timestamp": ts,
+            "rate": float(item["rate"]),
+            "funding_interval": 8,
+        })
+    if not rows:
+        return
+    try:
+        async with SessionLocal() as session:
+            stmt = pg_insert(FundingRate).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                constraint="funding_rates_pkey",
+                set_={"rate": stmt.excluded.rate},
+            )
+            await session.execute(stmt)
+            await session.commit()
+    except Exception as e:
+        logger.debug("store_history_failed", exchange=exchange, error=str(e)[:100])
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -165,113 +225,108 @@ async def get_market_summary():
 import aiohttp
 
 async def fetch_coinw_history(symbol: str, days: int):
-    """專屬 CoinW 歷史 API 抓取邏輯"""
+    """專屬 CoinW 歷史 API 抓取邏輯（含多 domain fallback）"""
     match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
     base = match.group(1).lower() if match else symbol.lower()
     
-    url = "https://futuresapi.faefrdpenn.com/v1/futuresc/public/selectFundingRateHistory"
-    payload = {"instrument": base, "day": days}
-    headers = {"Content-Type": "application/json"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('code') == 0:
-                        return [
-                            {
-                                "timestamp": datetime.strptime(item['createdDate'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).isoformat(),
-                                "rate": float(item['fundingRate'])
-                            } for item in data['data']
-                        ]
-    except Exception as e:
-        logger.error("coinw history api error", error=str(e)[:200])
+    urls = [
+        ("POST", f"https://futuresapi.faefrdpenn.com/v1/futuresc/public/selectFundingRateHistory", {"instrument": base, "day": days}),
+        ("GET", f"https://api.coinw.com/v1/perpum/fundingRateHistory?instrument={base}&day={days}", None),
+    ]
+    
+    for method, url, payload in urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                kwargs = {"timeout": 10}
+                if method == "POST":
+                    kwargs["json"] = payload
+                    kwargs["headers"] = {"Content-Type": "application/json"}
+                async with session.request(method, url, **kwargs) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        items = None
+                        if isinstance(data, dict) and data.get('code') == 0:
+                            items = data.get('data', [])
+                        elif isinstance(data, list):
+                            items = data
+                        if items:
+                            return [
+                                {
+                                    "timestamp": datetime.strptime(item['createdDate'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).isoformat(),
+                                    "rate": float(item['fundingRate'])
+                                } for item in items
+                            ]
+        except Exception:
+            continue
+    logger.warning("coinw_history_unavailable", symbol=symbol)
     return []
 
-@router.get("/rates/history_all/{symbol}")
-async def get_aggregated_history(symbol: str, days: int = 7):
-    """聚合查詢：並發向所有交易所請求該幣種的歷史，不再依賴本地資料庫。加入 Redis 快取。
-    
-    只查詢在即時資料中有該幣種的交易所，避免無謂的 API 請求。
-    Returns per-exchange data with status: {"data": {...}, "status": {"binance": "ok", ...}}
-    Each exchange has a 15s timeout. Results returned as soon as all complete or timeout.
+_ccxt_pool: Dict[str, ccxt_async.Exchange] = {}
+_ccxt_locks: Dict[str, asyncio.Lock] = {}
+
+async def _get_ccxt_exchange(ccxt_id: str) -> ccxt_async.Exchange:
+    """Get a CCXT exchange from the global pool — creates once, reuses forever.
+    Uses per-exchange lock to prevent duplicate load_markets() during racing requests.
+    Markets are loaded from SymbolInventory cache (no per-request load_markets).
     """
-    cache_key = f"history_all:{symbol}:{days}"
-    try:
-        redis = get_redis()
-        if redis:
-            cached = await redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-    except Exception as e:
-        logger.error("redis read error (history_all)", error=str(e)[:200])
+    if ccxt_id in _ccxt_pool:
+        return _ccxt_pool[ccxt_id]
 
-    clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
-    active_exchanges = []
-    if collector.latest_rates:
-        for exch in collector.exchanges.keys():
-            if any(clean_sym in k.upper() for k in collector.latest_rates if exch in k):
-                active_exchanges.append(exch)
+    if ccxt_id not in _ccxt_locks:
+        _ccxt_locks[ccxt_id] = asyncio.Lock()
 
-    if not active_exchanges:
-        active_exchanges = list(collector.exchanges.keys())
+    async with _ccxt_locks[ccxt_id]:
+        if ccxt_id in _ccxt_pool:
+            return _ccxt_pool[ccxt_id]
 
-    async def fetch_with_name(exchange: str) -> tuple[str, list]:
+        ex_class = getattr(ccxt_async, ccxt_id)
+        ex = ex_class({'options': {'defaultType': 'swap'}, 'timeout': 15000})
+
+        si = get_symbol_inventory()
+        cached_markets = si.get_markets(ccxt_id) if si else None
+        if cached_markets:
+            ex.markets = cached_markets
+        else:
+            await ex.load_markets()
+
+        _ccxt_pool[ccxt_id] = ex
+        logger.info("ccxt_pool_created", exchange=ccxt_id, markets=len(ex.markets))
+        return ex
+
+
+async def warm_ccxt_pool():
+    """Background: pre-creates all known CCXT exchange instances in the global pool.
+    Independent of symbol_inventory — uses cached markets if available, otherwise
+    calls load_markets() (per-exchange 45s timeout). Run at startup via create_task.
+    """
+    logger.info("pool_warm_started")
+    known = {
+        'binance', 'bybit', 'okx', 'bitget', 'gateio',
+        'kucoin', 'mexc', 'bingx', 'hyperliquid',
+    }
+    si = get_symbol_inventory()
+    if si:
+        market_ids = set(si.get_all_markets().keys())
+        known |= market_ids
+
+    for ccxt_id in sorted(known):
         try:
-            data = await asyncio.wait_for(
-                get_historical_rates(exchange, symbol, days),
-                timeout=30
-            )
-            return exchange, data
-        except asyncio.TimeoutError:
-            logger.warning("history timeout", exchange=exchange, symbol=symbol)
-            return exchange, []
+            if ccxt_id not in _ccxt_pool:
+                await _get_ccxt_exchange(ccxt_id)
+                logger.info("pool_warm_ok", exchange=ccxt_id)
         except Exception as e:
-            logger.error("history failed", exchange=exchange, symbol=symbol, error=str(e)[:200])
-            return exchange, []
+            logger.debug("pool_warm_skip", exchange=ccxt_id, error=str(e)[:100])
+    logger.info("pool_warm_complete", count=len(_ccxt_pool))
 
-    tasks = [fetch_with_name(ex) for ex in active_exchanges]
-    results = await asyncio.gather(*tasks)
 
-    result = {}
-    status: dict[str, str] = {}
-    for ex, history in results:
-        status[ex] = "ok" if history else "empty"
-        if history:
-            result[ex] = [{"time": int(datetime.fromisoformat(h['timestamp']).timestamp()), "value": h['rate']} for h in history]
+async def _live_fetch(exchange: str, symbol: str, days: int) -> list:
+    """Live API fetch for a single exchange/symbol — NO Redis, NO DB, just HTTP calls."""
+    ex_id = exchange.lower()
 
-    response = {"data": result, "status": status}
+    if ex_id == "coinw":
+        return await fetch_coinw_history(symbol, days)
 
-    try:
-        if redis and result:
-            await redis.setex(cache_key, 900, json.dumps(response))
-    except Exception as e:
-        logger.error("redis write error (history_all)", error=str(e)[:200])
-
-    return response
-
-@router.get("/rates/history/{exchange}/{symbol}")
-async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
-    """獲取單一交易所歷史資料：全面改為即時 API 抓取，加入 Redis 快取保護。"""
-    cache_key = f"history:{exchange.lower()}:{symbol.upper()}:{days}"
-    try:
-        redis = get_redis()
-        if redis:
-            cached = await redis.get(cache_key)
-            if cached:
-                return json.loads(cached)
-    except Exception as e:
-        logger.error("redis read error (history)", error=str(e)[:200])
-
-    if exchange.lower() == "coinw":
-        res = await fetch_coinw_history(symbol, days)
-        try:
-            if redis and res:
-                await redis.setex(cache_key, 900, json.dumps(res))
-        except: pass
-        return res
-
-    if exchange.lower() == "asterdex":
+    if ex_id == "asterdex":
         try:
             match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
             if not match:
@@ -288,118 +343,208 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
                                 "rate": float(d['fundingRate'])
                             } for d in data if d.get('fundingRate') is not None]
                             res.sort(key=lambda x: x['timestamp'])
-                            if redis and res:
-                                await redis.setex(cache_key, 900, json.dumps(res))
                             return res
         except Exception as e:
             logger.error("asterdex history failed", error=str(e)[:200])
         return []
 
-    if exchange.lower() == "lighter":
+    if ex_id == "lighter":
         return []
 
-    # DB as fallback if live API fails
-    db_hist = await get_history_from_db(exchange, symbol, days)
-
-    # For Aden: try authenticated API if credentials are configured
-    if exchange.lower() == "aden":
-        from backend.app.core.config import settings
-        if settings.aden_auth_available:
-            from backend.app.services.aden_api import init, fetch_funding_rate_history
-            priv_key = settings.ADEN_API_PRIVATE_KEY.get_secret_value() if settings.ADEN_API_PRIVATE_KEY else ""
-            init(settings.ADEN_API_USER, settings.ADEN_API_SIGNER, priv_key)
-            res = await fetch_funding_rate_history(symbol, limit=500)
-            if res:
-                res.sort(key=lambda x: x['timestamp'])
-                try:
-                    redis = get_redis()
-                    if redis:
-                        await redis.setex(cache_key, 900, json.dumps(res))
-                except: pass
-                return res
-        # No auth configured or API failed — DB will accumulate over time
+    ccxt_map = {'gate': 'gateio', 'aden': 'gateio', 'hyperliquid': 'hyperliquid'}
+    ccxt_id = ccxt_map.get(ex_id, ex_id)
+    if not hasattr(ccxt_async, ccxt_id):
         return []
 
+    ex = await _get_ccxt_exchange(ccxt_id)
     try:
-        ex_id = exchange.lower()
-        if ex_id == 'gate': ex_id = 'gateio'
-        if ex_id == 'hyperliquid': ex_id = 'hyperliquid'
+        match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+        base, quote = (match.group(1).upper(), match.group(2).upper()) if match else (symbol.upper(), 'USDT')
 
-        if hasattr(ccxt_async, ex_id):
-            ex_class = getattr(ccxt_async, ex_id)
-            ex = ex_class({'options': {'defaultType': 'swap'}, 'timeout': 15000})
-            try:
-                match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
-                base, quote = (match.group(1).upper(), match.group(2).upper()) if match else (symbol.upper(), 'USDT')
+        possible_syms = []
+        if ccxt_id == 'okx':
+            possible_syms = [f"{base}-{quote}-SWAP", f"{base}/{quote}:{quote}"]
+        elif ccxt_id == 'binance':
+            possible_syms = [f"{base}/{quote}:{quote}", f"{base}{quote}"]
+        elif ccxt_id == 'mexc':
+            possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}_{quote}"]
+        elif ccxt_id == 'hyperliquid':
+            alt_quote = 'USDC' if quote == 'USDT' else ('USDT' if quote == 'USDC' else quote)
+            possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{alt_quote}:{alt_quote}"]
+        else:
+            possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}{quote}"]
 
-                await ex.load_markets()
+        ccxt_sym = None
+        for s in possible_syms:
+            if s in ex.markets:
+                ccxt_sym = s
+                break
 
-                possible_syms = []
-                if ex_id == 'okx':
-                    possible_syms = [f"{base}-{quote}-SWAP", f"{base}/{quote}:{quote}"]
-                elif ex_id == 'binance':
-                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}{quote}"]
-                elif ex_id == 'mexc':
-                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}_{quote}"]
-                elif ex_id == 'hyperliquid':
-                    possible_syms = [f"{base}/{quote}:{quote}"]
-                else:
-                    possible_syms = [f"{base}/{quote}:{quote}", f"{base}/{quote}", f"{base}{quote}"]
-
-                ccxt_sym = None
-                for s in possible_syms:
-                    if s in ex.markets:
-                        ccxt_sym = s
-                        break
-
-                if not ccxt_sym:
-                    bases_to_try = [base]
-                    prefix_m = re.match(r'^(1000|10000|1000000|1000000000)(.+)$', base)
-                    if prefix_m:
-                        bases_to_try.append(prefix_m.group(2))
-                    for b in bases_to_try:
-                        for s, mkt in ex.markets.items():
-                            if mkt.get('swap') and mkt.get('base') == b and (mkt.get('quote') == quote or mkt.get('settle') == quote):
-                                ccxt_sym = s
-                                break
-                        if ccxt_sym:
+        if not ccxt_sym:
+            bases_to_try = [base]
+            prefix_m = re.match(r'^(1000|10000|1000000|1000000000)(.+)$', base)
+            if prefix_m:
+                bases_to_try.append(prefix_m.group(2))
+            quotes_to_try = [quote]
+            if quote == 'USDT':
+                quotes_to_try.append('USDC')
+            elif quote == 'USDC':
+                quotes_to_try.append('USDT')
+            for b in bases_to_try:
+                for q in quotes_to_try:
+                    for s, mkt in ex.markets.items():
+                        if mkt.get('swap') and mkt.get('base') == b and (mkt.get('quote') == q or mkt.get('settle') == q):
+                            ccxt_sym = s
                             break
+                    if ccxt_sym:
+                        break
+                if ccxt_sym:
+                    break
 
-                if ccxt_sym and ex.has.get('fetchFundingRateHistory'):
-                    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-                    limit = 1000
-                    hist = await ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=limit)
+        if ccxt_sym and ex.has.get('fetchFundingRateHistory'):
+            since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+            limit = 1000
+            hist = await asyncio.wait_for(
+                ex.fetch_funding_rate_history(ccxt_sym, since=since, limit=limit),
+                timeout=15
+            )
 
-                    api_data = []
-                    for h in hist:
-                        if h.get('fundingRate') is not None:
-                            api_data.append({
-                                "timestamp": datetime.fromtimestamp(h['timestamp']/1000, tz=timezone.utc).isoformat(),
-                                "rate": float(h['fundingRate'])
-                            })
+            api_data = []
+            for h in hist:
+                if h.get('fundingRate') is not None:
+                    api_data.append({
+                        "timestamp": datetime.fromtimestamp(h['timestamp']/1000, tz=timezone.utc).isoformat(),
+                        "rate": float(h['fundingRate'])
+                    })
+            if api_data:
+                return sorted(api_data, key=lambda x: x['timestamp'])
 
-                    if api_data:
-                        res = sorted(api_data, key=lambda x: x['timestamp'])
-                        try:
-                            if redis: await redis.setex(cache_key, 900, json.dumps(res))
-                        except: pass
-                        return res
-
-                logger.warning("history fetch result", ex_id=ex_id, symbol=symbol, ccxt_sym=ccxt_sym, found=ccxt_sym in ex.markets if ccxt_sym else False)
-            finally:
-                await ex.close()
+        logger.warning("history fetch result", ex_id=ex_id, symbol=symbol, ccxt_sym=ccxt_sym, found=ccxt_sym in ex.markets if ccxt_sym else False)
     except Exception as e:
         logger.error("history api fetch failed", exchange=exchange, symbol=symbol, error=str(e)[:200])
-
-    # Fallback to DB if live API returned nothing
-    if db_hist:
-        try:
-            redis = get_redis()
-            if redis:
-                await redis.setex(cache_key, 900, json.dumps(db_hist))
-        except: pass
-        return db_hist
     return []
+
+
+@router.get("/rates/history_all/{symbol}")
+async def get_aggregated_history(symbol: str, days: int = 7):
+    """聚合查詢：Redis cache → 並發 per-exchange 15s internal timeout → 60s 整體 timeout。
+    第一次請求 (pool cold) 最慢 60s，後續 <1s (cache hit / pool warm)。
+    """
+    cache_key = f"history_all:{symbol}:{days}"
+    redis = get_redis()
+
+    # 1. Redis cache → instant
+    if redis:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    clean_sym = re.sub(r'(-|/|_|SWAP|PERP|M$)', '', symbol).upper()
+    active_exchanges = []
+    if collector.latest_rates:
+        for exch in collector.exchanges.keys():
+            if any(clean_sym in k.upper() for k in collector.latest_rates if exch in k):
+                active_exchanges.append(exch)
+    if not active_exchanges:
+        active_exchanges = list(collector.exchanges.keys())
+
+    sem = asyncio.Semaphore(3)
+
+    async def fetch_one(ex: str):
+        async with sem:
+            try:
+                data = await _live_fetch(ex, symbol, days)
+                return ex, data
+            except asyncio.TimeoutError:
+                logger.debug("history_all_timeout", exchange=ex, symbol=symbol)
+                return ex, []
+            except Exception as e:
+                logger.error("history_all_failed", exchange=ex, symbol=symbol, error=str(e)[:100])
+                return ex, []
+
+    tasks = [asyncio.create_task(fetch_one(ex)) for ex in active_exchanges]
+    done, pending = await asyncio.wait(tasks, timeout=60)
+    for t in pending:
+        t.cancel()
+
+    result = {}
+    status: Dict[str, str] = {}
+    for t in done:
+        try:
+            ex, data = t.result()
+            status[ex] = "ok" if data else "empty"
+            if data:
+                result[ex] = [{"time": int(datetime.fromisoformat(h['timestamp']).timestamp()), "value": h['rate']} for h in data]
+        except Exception:
+            pass
+    for t in pending:
+        ex_name = "unknown"
+        try:
+            coro = t.get_coro()
+            if coro and hasattr(coro, 'cr_frame'):
+                ex_name = coro.cr_frame.f_locals.get('ex', 'unknown')
+        except Exception:
+            pass
+        status[ex_name] = "timeout"
+
+    response = {"data": result, "status": status}
+
+    if redis:
+        try:
+            await redis.setex(cache_key, 3600, json.dumps(response))
+        except Exception:
+            pass
+
+    return response
+
+
+@router.get("/rates/history/{exchange}/{symbol}")
+async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
+    """歷史資金費率：Redis cache → DB → live API (15s internal timeout on API call only).
+    使用者 99% 請求 <1ms (cache hit)，最慢 30s (第一次 + load_markets)。
+    """
+    cache_key = f"history:{exchange.lower()}:{symbol.upper()}:{days}"
+    redis = get_redis()
+
+    # 1. Redis → return immediately
+    if redis:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    # 2. DB → return only if data spans the full requested period
+    db_data = await get_history_from_db(exchange, symbol, days)
+    if db_data:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        earliest_ts = min(datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")) for d in db_data)
+        if earliest_ts <= since:
+            return db_data
+        logger.info("history_db_incomplete", exchange=exchange, symbol=symbol, days=days,
+                    earliest=earliest_ts.isoformat(), since=since.isoformat())
+
+    # 3. Live fetch (internal 15s timeout wraps only fetchFundingRateHistory, not exchange creation)
+    try:
+        raw = await _live_fetch(exchange, symbol, days)
+    except asyncio.TimeoutError:
+        logger.warning("history_live_timeout", exchange=exchange, symbol=symbol)
+        raw = []
+
+    data = _deduplicate_settlement(raw) if raw else []
+    if data:
+        await _store_history_batch(exchange.lower(), symbol, data)
+    if redis:
+        try:
+            await redis.setex(cache_key, _HISTORY_CACHE_TTL, json.dumps(data))
+        except Exception:
+            pass
+
+    return data
 
 
 @router.get("/analysis/spreads")
@@ -575,6 +720,30 @@ async def get_orderbook(exchange: str, symbol: str, limit: int = 20, buy_size: f
         return {"error": str(e)}
 
     return {"error": "unsupported exchange"}
+
+@router.get("/symbols")
+async def get_all_symbols():
+    si = get_symbol_inventory()
+    if si and si.ready:
+        return si.get_all()
+    return {}
+
+
+@router.get("/symbols/{exchange}")
+async def get_exchange_symbols(exchange: str):
+    si = get_symbol_inventory()
+    if si and si.ready:
+        return si.get_exchange_symbols(exchange)
+    return []
+
+
+@router.get("/symbols/check/{exchange}/{symbol}")
+async def check_symbol_supported(exchange: str, symbol: str):
+    si = get_symbol_inventory()
+    if si and si.ready:
+        return {"supported": si.has_symbol(exchange, symbol)}
+    return {"supported": True}
+
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

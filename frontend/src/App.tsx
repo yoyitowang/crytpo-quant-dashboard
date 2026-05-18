@@ -158,7 +158,32 @@ function App() {
 
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [loadingMulti, setLoadingMulti] = useState(false);
-  const [historyCache, setHistoryCache] = useState<Record<string, any>>({});
+  const CACHE_TTL = 30 * 60 * 1000;
+  const MAX_CACHE_SIZE = 50;
+  const cacheRef = useRef<Map<string, {data: any, time: number}>>(new Map());
+  const cacheGet = useCallback(<T,>(key: string): T | null => {
+    const entry = cacheRef.current.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.time > CACHE_TTL) {
+      cacheRef.current.delete(key);
+      return null;
+    }
+    cacheRef.current.delete(key);
+    cacheRef.current.set(key, entry);
+    return entry.data as T;
+  }, []);
+  const cacheSet = useCallback((key: string, data: any) => {
+    if (cacheRef.current.has(key)) {
+      cacheRef.current.get(key)!.time = Date.now();
+      return;
+    }
+    if (cacheRef.current.size >= MAX_CACHE_SIZE) {
+      const oldestKey = cacheRef.current.keys().next().value;
+      if (oldestKey !== undefined) cacheRef.current.delete(oldestKey);
+    }
+    cacheRef.current.set(key, {data, time: Date.now()});
+  }, []);
+  const [symbolInventory, setSymbolInventory] = useState<Record<string, string[]> | null>(null);
 
   const LoadingSpinner = ({ label }: { label?: string }) => (
     <div className="flex flex-col items-center justify-center gap-4 py-12">
@@ -272,6 +297,9 @@ function App() {
 
         fetch('/api/analysis/summary').then(res => res.json()).then(setSummary);
         fetch('/api/health/ready').then(res => res.json()).then(setHealth);
+        fetch('/api/symbols').then(res => res.json()).then(data => {
+            if (data && typeof data === 'object' && Object.keys(data).length > 0) setSymbolInventory(data);
+        }).catch(() => {});
     };
     fetchData();
     const interval = setInterval(fetchData, 30000); // 延長 API 輪詢間隔，主要靠 WS 更新
@@ -285,32 +313,34 @@ function App() {
   useEffect(() => {
     if (selectedPair) {
         const cacheKey = `${selectedPair.exchange}_${selectedPair.symbol}_${timeframe}`;
-        if (historyCache[cacheKey]) {
-            setHistory(historyCache[cacheKey]);
+        const cached = cacheGet<any[]>(cacheKey);
+        if (cached) {
+            setHistory(cached);
             setLoadingHistory(false);
             return;
         }
 
-        setHistory([]); // 清空舊資料，避免渲染舊圖表
+        setHistory([]);
         setLoadingHistory(true);
         fetch(`/api/rates/history/${selectedPair.exchange}/${selectedPair.symbol}?days=${timeframe}`)
             .then(res => res.json())
             .then(data => {
                 const res = Array.isArray(data) ? data : [];
                 setHistory(res);
-                setHistoryCache(prev => ({ ...prev, [cacheKey]: res }));
+                cacheSet(cacheKey, res);
                 setLoadingHistory(false);
             })
             .catch(() => setLoadingHistory(false));
     }
-  }, [selectedPair, timeframe]); // 移除了 historyCache 依賴
+  }, [selectedPair, timeframe]);
 
   useEffect(() => {
     if (compareSymbol) {
         const cacheKey = `all_${compareSymbol}_${timeframe}`;
-        if (historyCache[cacheKey]) {
-            const cached = historyCache[cacheKey];
-            setMultiHistory(cached.data || cached);
+        const cached = cacheGet<any>(cacheKey);
+        if (cached) {
+            const hist = cached?.data || cached;
+            setMultiHistory(hist);
             setLoadingMulti(false);
             return;
         }
@@ -322,7 +352,7 @@ function App() {
             .then(data => {
                 const hist = data.data || data;
                 setMultiHistory(hist);
-                setHistoryCache(prev => ({ ...prev, [cacheKey]: data }));
+                cacheSet(cacheKey, data);
                 setLoadingMulti(false);
             })
             .catch(() => {
@@ -330,7 +360,7 @@ function App() {
             });
         setVisibleExchanges(ALL_EXCHANGES); 
     } else { setMultiHistory(null); }
-  }, [compareSymbol, timeframe]); // 移除了 historyCache 依賴
+  }, [compareSymbol, timeframe]);
 
   const filteredData = useMemo(() => {
     const symbolsMap: Record<string, Record<string, {rate: number, interval: number, markPrice?: number}>> = {};
@@ -634,6 +664,9 @@ function App() {
                                     const interval = row.intervals[ex];
                                     const markPrice = row.markPrices?.[ex];
 
+                                    const symInv = symbolInventory?.[ex];
+                                    const isSupported = !symInv || symInv.includes(row.symbol);
+
                                     const showFunding = dataMode === 'funding' || dataMode === 'all';
                                     const showPrice = dataMode === 'price' || dataMode === 'all';
                                     const primaryVal = showFunding ? (rate || 0) * 100 : (markPrice || 0);
@@ -660,18 +693,22 @@ function App() {
                                     }
 
                                     const handleClick = () => {
-                                        if (rate !== undefined && markPrice) {
+                                        if (rate !== undefined) {
                                             setSelectedPair({exchange: ex, symbol: row.symbol});
                                             setTimeframe(7);
                                         }
                                     };
 
+                                    const displayText = hasData
+                                        ? (showFunding ? `${(rate! * 100).toFixed(4)}%` : formatPrice(Number(markPrice)))
+                                        : (isSupported ? '--' : 'N/A');
+
                                     return (
                                         <td key={ex} className="p-0 border-l border-gray-900/20">
                                             <div style={style} className="w-full h-[76px] flex flex-col items-center justify-center cursor-pointer hover:brightness-150 transition-all border-b border-transparent hover:border-white/20 relative group/cell" onClick={handleClick}>
                                                 {showFunding && rate !== undefined && <div className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full" style={{ backgroundColor: healthColor }} title={healthColor === '#22c55e' ? 'Valid' : healthColor === '#eab308' ? 'Warning' : 'Suspicious'} />}
-                                                <span className={`font-mono text-[11px] font-bold ${hasData ? 'text-white' : 'text-gray-800/50'}`}>
-                                                    {showFunding ? (rate !== undefined ? `${(rate * 100).toFixed(4)}%` : '--') : (markPrice !== undefined ? formatPrice(Number(markPrice)) : '--')}
+                                                <span className={`font-mono text-[11px] font-bold ${hasData ? 'text-white' : (isSupported ? 'text-gray-800/50' : 'text-gray-800/30')}`}>
+                                                    {displayText}
                                                 </span>
                                                 {dataMode === 'all' && rate !== undefined && (
                                                     <span className="text-[8px] font-mono text-white/40 mt-0.5">{markPrice ? formatPrice(Number(markPrice)) : ''}</span>

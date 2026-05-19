@@ -39,7 +39,7 @@ async def run_prefetch():
     logger.info("prefetch_start", total=len(pairs))
 
     async def prefetch_one(exchange: str, symbol: str):
-        for days in (3, 7):
+        for days in (3, 7, 14, 30):
             cache_key = f"history:{exchange}:{symbol}:{days}"
             if redis:
                 try:

@@ -146,6 +146,7 @@ function App() {
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
   const [sortConfig, setSortConfig] = useState<{key: string, direction: 'asc' | 'desc'}>({key: 'spread', direction: 'desc'});
+  const [spreadChangeHours, setSpreadChangeHours] = useState(24);
   const [favorites, setFavorites] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('quantmatrix_favorites') || '[]') } catch { return [] }
   });
@@ -161,6 +162,9 @@ function App() {
   const CACHE_TTL = 30 * 60 * 1000;
   const MAX_CACHE_SIZE = 50;
   const cacheRef = useRef<Map<string, {data: any, time: number}>>(new Map());
+  const spreadSnapshotsRef = useRef<Map<string, Array<{t: number, s: number}>>>(new Map());
+  const ratesRef = useRef(rates);
+  ratesRef.current = rates;
   const cacheGet = useCallback(<T,>(key: string): T | null => {
     const entry = cacheRef.current.get(key);
     if (!entry) return null;
@@ -213,8 +217,9 @@ function App() {
     if (!isoStr || isoStr === "None") return "--:--:--";
     try {
         const date = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
+        if (isNaN(date.getTime())) return "--:--:--";
         return date.toLocaleString();
-    } catch (e) { return isoStr; }
+    } catch (e) { return "--:--:--"; }
   };
 
   const formatPrice = (price: number) => {
@@ -295,8 +300,8 @@ function App() {
           }
         } catch (e) { console.error("Fetch compressed error", e); }
 
-        fetch('/api/analysis/summary').then(res => res.json()).then(setSummary);
-        fetch('/api/health/ready').then(res => res.json()).then(setHealth);
+        fetch('/api/analysis/summary').then(res => res.json()).then(setSummary).catch(() => {});
+        fetch('/api/health/ready').then(res => res.json()).then(setHealth).catch(() => {});
         fetch('/api/symbols').then(res => res.json()).then(data => {
             if (data && typeof data === 'object' && Object.keys(data).length > 0) setSymbolInventory(data);
         }).catch(() => {});
@@ -309,6 +314,64 @@ function App() {
   useEffect(() => {
     checkAlerts(rates);
   }, [rates, checkAlerts]);
+
+  // Load spread snapshots from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('quantmatrix_spread_snapshots');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const map = new Map<string, Array<{t: number, s: number}>>();
+        Object.entries(parsed).forEach(([sym, arr]: [string, any]) => {
+          map.set(sym, arr as Array<{t: number, s: number}>);
+        });
+        spreadSnapshotsRef.current = map;
+      }
+    } catch {}
+  }, []);
+
+  // Snapshot spread values every 5 minutes + persist to localStorage
+  useEffect(() => {
+    const takeSnapshot = () => {
+      const map = spreadSnapshotsRef.current;
+      const currentRates = ratesRef.current;
+      const now = Date.now();
+      const exchangeList = selectedExchanges;
+
+      const symbolsMap: Record<string, Record<string, {rate: number, interval: number}>> = {};
+      Object.values(currentRates).forEach(r => {
+        if (!symbolsMap[r.symbol]) symbolsMap[r.symbol] = {};
+        symbolsMap[r.symbol][r.exchange] = { rate: r.rate, interval: r.interval || 8 };
+      });
+
+      Object.entries(symbolsMap).forEach(([sym, exchanges]) => {
+        const entries = Object.entries(exchanges).filter(([ex]) => exchangeList.includes(ex));
+        if (entries.length < 2) return;
+        const aprs = entries.map(([_, d]) => d.rate * (24 / d.interval) * 365);
+        const spread = Math.max(...aprs) - Math.min(...aprs);
+        if (spread <= 0) return;
+        if (!map.has(sym)) map.set(sym, []);
+        const arr = map.get(sym)!;
+        arr.push({ t: now, s: spread * 100 });
+        const cutoff = now - 48 * 3600000;
+        while (arr.length > 0 && arr[0].t < cutoff) arr.shift();
+      });
+
+      // Persist to localStorage (keep last 24h of snapshots per symbol)
+      try {
+        const obj: Record<string, Array<{t: number, s: number}>> = {};
+        map.forEach((arr, sym) => {
+          const recent = arr.filter(e => e.t > now - 24 * 3600000);
+          if (recent.length > 0) obj[sym] = recent;
+        });
+        localStorage.setItem('quantmatrix_spread_snapshots', JSON.stringify(obj));
+      } catch {}
+    };
+
+    takeSnapshot();
+    const interval = setInterval(takeSnapshot, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [selectedExchanges]);
 
   useEffect(() => {
     if (selectedPair) {
@@ -380,6 +443,23 @@ function App() {
         const actualMin = activeAPRs.length > 0 ? Math.min(...activeAPRs) : 0;
         const spread = activeAPRs.length > 1 ? (actualMax - actualMin) : 0;
 
+        let spreadChange: number | null = null;
+        if (spread > 0) {
+          const snapshots = spreadSnapshotsRef.current.get(sym);
+          if (snapshots && snapshots.length > 0) {
+            const targetTime = Date.now() - spreadChangeHours * 3600000;
+            let closest = snapshots[0];
+            let minDiff = Infinity;
+            for (const s of snapshots) {
+              const diff = Math.abs(s.t - targetTime);
+              if (diff < minDiff) { minDiff = diff; closest = s; }
+            }
+            if (minDiff < spreadChangeHours * 3600000 * 0.5 && closest.t < Date.now() - 60000) {
+              spreadChange = spread * 100 - closest.s;
+            }
+          }
+        }
+
         const activePrices = Object.entries(symbolsMap[sym])
             .filter(([ex]) => selectedExchanges.includes(ex))
             .map(([_, d]) => d.markPrice)
@@ -395,6 +475,7 @@ function App() {
             markPrices: Object.fromEntries(Object.entries(symbolsMap[sym]).map(([ex, d]) => [ex, d.markPrice])),
             maxApr: maxAprMagnitude * 100,
             spread: spread * 100,
+            spreadChange,
             maxPrice,
             priceSpread,
             base: sym.replace(/USDT|USDC/i, ''), 
@@ -408,6 +489,7 @@ function App() {
         if (sortConfig.key === 'symbol') { v1 = a.symbol; v2 = b.symbol; }
         else if (sortConfig.key === 'maxApr') { v1 = a.maxApr > 0 ? a.maxApr : undefined; v2 = b.maxApr > 0 ? b.maxApr : undefined; }
         else if (sortConfig.key === 'spread') { v1 = a.spread > 0 ? a.spread : undefined; v2 = b.spread > 0 ? b.spread : undefined; }
+        else if (sortConfig.key === 'spreadChange') { v1 = a.spreadChange !== null ? a.spreadChange : undefined; v2 = b.spreadChange !== null ? b.spreadChange : undefined; }
         else if (sortConfig.key === 'maxPrice') { v1 = a.maxPrice > 0 ? a.maxPrice : undefined; v2 = b.maxPrice > 0 ? b.maxPrice : undefined; }
         else if (sortConfig.key === 'priceSpread') { v1 = a.priceSpread > 0 ? a.priceSpread : undefined; v2 = b.priceSpread > 0 ? b.priceSpread : undefined; }
         else { v1 = a.rates[sortConfig.key]; v2 = b.rates[sortConfig.key]; }
@@ -416,7 +498,7 @@ function App() {
         return sortConfig.direction === 'asc' ? res : -res;
     });
     return result;
-  }, [rates, search, selectedExchanges, sortConfig]);
+  }, [rates, search, selectedExchanges, sortConfig, spreadChangeHours]);
 
   const currentSymbols = filteredData.slice((page - 1) * pageSize, page * pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredData.length / pageSize));
@@ -635,6 +717,33 @@ function App() {
                                     </div>
                                 </div>
                             </th>
+                            {dataMode !== 'price' && (
+                            <th className="w-32 px-4 py-6 text-center border-l border-gray-900/50 cursor-pointer group relative" onClick={() => handleSort('spreadChange')}>
+                                <div className="flex items-center justify-center gap-1.5">
+                                    <span>Δ Spread</span>
+                                    <div className="relative group/tip">
+                                        <Activity size={12} className="text-cyan-500 cursor-help" />
+                                        <div className="absolute top-full right-0 mt-3 w-64 p-4 bg-[#0d0d0d] border border-gray-800 rounded-[20px] shadow-3xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-all z-[9999] text-left ring-1 ring-white/5">
+                                            <p className="text-[10px] font-black text-white uppercase mb-2">Spread APR Change</p>
+                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">Change in spread APR over the past {spreadChangeHours}h. Positive = arbitrage gap widening.</p>
+                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-cyan-400">Δ = Current Spread − Spread ({spreadChangeHours}h ago)</div>
+                                            <div className="absolute bottom-full right-1 border-[6px] border-transparent border-b-[#0d0d0d]"></div>
+                                        </div>
+                                    </div>
+                                    <select
+                                        value={spreadChangeHours}
+                                        onChange={e => setSpreadChangeHours(Number(e.target.value))}
+                                        className="bg-transparent text-[9px] font-mono text-cyan-500 cursor-pointer outline-none"
+                                        onClick={e => e.stopPropagation()}
+                                    >
+                                        <option value={6}>6H</option>
+                                        <option value={12}>12H</option>
+                                        <option value={24}>24H</option>
+                                        <option value={48}>48H</option>
+                                    </select>
+                                </div>
+                            </th>
+                            )}
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-900">
@@ -729,6 +838,17 @@ function App() {
                                 <td className="px-6 py-5 text-center border-l border-gray-900 font-black text-xs text-purple-500">
                                     {dataMode === 'price' ? (row.priceSpread > 0 ? formatPrice(row.priceSpread) : '--') : (row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--')}
                                 </td>
+                                {dataMode !== 'price' && (
+                                <td className="px-4 py-5 text-center border-l border-gray-900 font-black text-xs">
+                                    {row.spreadChange !== null ? (
+                                        <span className={row.spreadChange > 0.01 ? 'text-green-500' : row.spreadChange < -0.01 ? 'text-red-500' : 'text-gray-500'}>
+                                            {row.spreadChange > 0 ? '+' : ''}{row.spreadChange.toFixed(2)}%
+                                        </span>
+                                    ) : (
+                                        <span className="text-gray-800/50">--</span>
+                                    )}
+                                </td>
+                                )}
                             </tr>
                         ))}
                     </tbody>
@@ -798,6 +918,14 @@ function App() {
                              <div className="text-[8px] font-bold text-gray-600 uppercase">{dataMode === 'price' ? 'Price Gap' : 'Spread APR'}</div>
                              <div className="text-[10px] font-black text-purple-500">{dataMode === 'price' ? (row.priceSpread > 0 ? formatPrice(row.priceSpread) : '--') : (row.spread > 0 ? `${row.spread.toFixed(1)}%` : '--')}</div>
                         </div>
+                        {dataMode !== 'price' && (
+                        <div className="mt-1 pt-1 border-t border-gray-900/30 flex justify-between items-center">
+                             <div className="text-[7px] font-bold text-gray-700 uppercase">Δ Spread</div>
+                             <div className={`text-[9px] font-black ${row.spreadChange !== null ? (row.spreadChange > 0.01 ? 'text-green-500' : row.spreadChange < -0.01 ? 'text-red-500' : 'text-gray-500') : 'text-gray-800'}`}>
+                                {row.spreadChange !== null ? `${row.spreadChange > 0 ? '+' : ''}${row.spreadChange.toFixed(2)}%` : '--'}
+                             </div>
+                        </div>
+                        )}
                     </div>
                 ))}
             </div>

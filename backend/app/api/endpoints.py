@@ -261,6 +261,81 @@ async def fetch_coinw_history(symbol: str, days: int):
     logger.warning("coinw_history_unavailable", symbol=symbol)
     return []
 
+_lighter_market_cache: dict = {"data": None, "time": 0}
+_LIGHTER_CACHE_TTL = 300
+
+async def fetch_lighter_history(symbol: str, days: int) -> list:
+    """Lighter 官方 API 抓取歷史資金費率。
+    https://apidocs.lighter.xyz/reference/fundings
+    """
+    base = re.sub(r'(USDT|USDC)$', '', symbol, flags=re.IGNORECASE).upper()
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 1. 獲取 market_id (快取 5 分鐘)
+            market_id = None
+            now_ts = datetime.now(timezone.utc).timestamp()
+            if _lighter_market_cache["data"] is None or now_ts - _lighter_market_cache["time"] > _LIGHTER_CACHE_TTL:
+                async with session.get(
+                    "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates",
+                    timeout=10
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("code") == 200:
+                            _lighter_market_cache["data"] = data["funding_rates"]
+                            _lighter_market_cache["time"] = now_ts
+
+            if _lighter_market_cache["data"]:
+                for item in _lighter_market_cache["data"]:
+                    if item.get("exchange") == "lighter" and item.get("symbol", "").upper() == base:
+                        market_id = item["market_id"]
+                        break
+
+            if market_id is None:
+                logger.warning("lighter_market_not_found", symbol=symbol, base=base)
+                return []
+
+            # 2. 取得歷史 funding 資料
+            now = int(datetime.now(timezone.utc).timestamp())
+            since = now - days * 86400
+            async with session.get(
+                "https://mainnet.zklighter.elliot.ai/api/v1/fundings",
+                params={
+                    "market_id": market_id,
+                    "resolution": "1h",
+                    "start_timestamp": since,
+                    "end_timestamp": now,
+                    "count_back": 1000,
+                },
+                timeout=15
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                hist = await resp.json()
+                if hist.get("code") != 200:
+                    return []
+
+                result = []
+                for f in hist.get("fundings", []):
+                    rate = float(f["rate"])
+                    if rate == 0:
+                        continue
+                    direction = f.get("direction", "long")
+                    # direction "short" → shorts pay longs → rate negative in our convention
+                    signed_rate = rate if direction == "long" else -rate
+                    result.append({
+                        "timestamp": datetime.fromtimestamp(f["timestamp"], tz=timezone.utc).isoformat(),
+                        "rate": signed_rate
+                    })
+
+                if result:
+                    result.sort(key=lambda x: x["timestamp"])
+                return result
+    except Exception as e:
+        logger.error("lighter_history_failed", symbol=symbol, error=str(e)[:200])
+        return []
+
 _ccxt_pool: Dict[str, ccxt_async.Exchange] = {}
 _ccxt_locks: Dict[str, asyncio.Lock] = {}
 
@@ -349,7 +424,7 @@ async def _live_fetch(exchange: str, symbol: str, days: int) -> list:
         return []
 
     if ex_id == "lighter":
-        return []
+        return await fetch_lighter_history(symbol, days)
 
     ccxt_map = {'gate': 'gateio', 'aden': 'gateio', 'hyperliquid': 'hyperliquid'}
     ccxt_id = ccxt_map.get(ex_id, ex_id)
@@ -457,6 +532,10 @@ async def get_aggregated_history(symbol: str, days: int = 7):
         async with sem:
             try:
                 data = await _live_fetch(ex, symbol, days)
+                if not data:
+                    db = await get_history_from_db(ex, symbol, days)
+                    if db:
+                        data = _deduplicate_settlement(db)
                 return ex, data
             except asyncio.TimeoutError:
                 logger.debug("history_all_timeout", exchange=ex, symbol=symbol)
@@ -536,6 +615,14 @@ async def get_historical_rates(exchange: str, symbol: str, days: int = 7):
         raw = []
 
     data = _deduplicate_settlement(raw) if raw else []
+
+    # 4. Fallback: live API 無資料時，使用 DB 已累積的資料
+    #    適用於無歷史 API 的交易所 (e.g., lighter)
+    if not data and db_data:
+        logger.info("history_db_fallback", exchange=exchange, symbol=symbol,
+                     days=days, db_points=len(db_data))
+        data = _deduplicate_settlement(db_data) or db_data
+
     if data:
         await _store_history_batch(exchange.lower(), symbol, data)
     if redis:

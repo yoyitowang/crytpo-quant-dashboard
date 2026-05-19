@@ -37,9 +37,10 @@ async def test_history_coinw_returns_list():
 
 
 @pytest.mark.asyncio
-async def test_history_empty_for_lighter():
+async def test_history_lighter_returns_list():
+    """Lighter should return a list via official API (may be empty if API unavailable)."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/rates/history/lighter/BTCUSDT?days=7")
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert isinstance(resp.json(), list)

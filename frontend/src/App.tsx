@@ -163,6 +163,7 @@ function App() {
   const MAX_CACHE_SIZE = 50;
   const cacheRef = useRef<Map<string, {data: any, time: number}>>(new Map());
   const spreadSnapshotsRef = useRef<Map<string, Array<{t: number, s: number}>>>(new Map());
+  const lastSpreadFetchRef = useRef(0);
   const ratesRef = useRef(rates);
   ratesRef.current = rates;
   const cacheGet = useCallback(<T,>(key: string): T | null => {
@@ -315,63 +316,34 @@ function App() {
     checkAlerts(rates);
   }, [rates, checkAlerts]);
 
-  // Load spread snapshots from localStorage on mount
-  useEffect(() => {
+  // Load spread snapshots from backend API
+  const fetchSpreadHistory = useCallback(async () => {
     try {
-      const saved = localStorage.getItem('quantmatrix_spread_snapshots');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        const map = new Map<string, Array<{t: number, s: number}>>();
-        Object.entries(parsed).forEach(([sym, arr]: [string, any]) => {
-          map.set(sym, arr as Array<{t: number, s: number}>);
-        });
-        spreadSnapshotsRef.current = map;
-      }
+      const now = Date.now();
+      // Avoid fetching more than once per 60s
+      if (now - lastSpreadFetchRef.current < 60000) return;
+      lastSpreadFetchRef.current = now;
+
+      const res = await fetch('/api/analysis/spread-history?hours=48');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error) return;
+
+      const map = new Map<string, Array<{t: number, s: number}>>();
+      Object.entries(data).forEach(([sym, arr]: [string, any]) => {
+        if (Array.isArray(arr)) {
+          map.set(sym, (arr as Array<[number, number]>).map(([t, s]) => ({ t, s })));
+        }
+      });
+      spreadSnapshotsRef.current = map;
     } catch {}
   }, []);
 
-  // Snapshot spread values every 5 minutes + persist to localStorage
   useEffect(() => {
-    const takeSnapshot = () => {
-      const map = spreadSnapshotsRef.current;
-      const currentRates = ratesRef.current;
-      const now = Date.now();
-      const exchangeList = selectedExchanges;
-
-      const symbolsMap: Record<string, Record<string, {rate: number, interval: number}>> = {};
-      Object.values(currentRates).forEach(r => {
-        if (!symbolsMap[r.symbol]) symbolsMap[r.symbol] = {};
-        symbolsMap[r.symbol][r.exchange] = { rate: r.rate, interval: r.interval || 8 };
-      });
-
-      Object.entries(symbolsMap).forEach(([sym, exchanges]) => {
-        const entries = Object.entries(exchanges).filter(([ex]) => exchangeList.includes(ex));
-        if (entries.length < 2) return;
-        const aprs = entries.map(([_, d]) => d.rate * (24 / d.interval) * 365);
-        const spread = Math.max(...aprs) - Math.min(...aprs);
-        if (spread <= 0) return;
-        if (!map.has(sym)) map.set(sym, []);
-        const arr = map.get(sym)!;
-        arr.push({ t: now, s: spread * 100 });
-        const cutoff = now - 48 * 3600000;
-        while (arr.length > 0 && arr[0].t < cutoff) arr.shift();
-      });
-
-      // Persist to localStorage (keep last 24h of snapshots per symbol)
-      try {
-        const obj: Record<string, Array<{t: number, s: number}>> = {};
-        map.forEach((arr, sym) => {
-          const recent = arr.filter(e => e.t > now - 24 * 3600000);
-          if (recent.length > 0) obj[sym] = recent;
-        });
-        localStorage.setItem('quantmatrix_spread_snapshots', JSON.stringify(obj));
-      } catch {}
-    };
-
-    takeSnapshot();
-    const interval = setInterval(takeSnapshot, 5 * 60 * 1000);
+    fetchSpreadHistory();
+    const interval = setInterval(fetchSpreadHistory, 5 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [selectedExchanges]);
+  }, [fetchSpreadHistory]);
 
   useEffect(() => {
     if (selectedPair) {
@@ -444,6 +416,7 @@ function App() {
         const spread = activeAPRs.length > 1 ? (actualMax - actualMin) : 0;
 
         let spreadChange: number | null = null;
+        let spreadChangePct: number | null = null;
         if (spread > 0) {
           const snapshots = spreadSnapshotsRef.current.get(sym);
           if (snapshots && snapshots.length > 0) {
@@ -456,6 +429,7 @@ function App() {
             }
             if (minDiff < spreadChangeHours * 3600000 * 0.5 && closest.t < Date.now() - 60000) {
               spreadChange = spread * 100 - closest.s;
+              spreadChangePct = closest.s !== 0 ? (spreadChange / closest.s) * 100 : null;
             }
           }
         }
@@ -476,6 +450,7 @@ function App() {
             maxApr: maxAprMagnitude * 100,
             spread: spread * 100,
             spreadChange,
+            spreadChangePct,
             maxPrice,
             priceSpread,
             base: sym.replace(/USDT|USDC/i, ''), 
@@ -725,8 +700,8 @@ function App() {
                                         <Activity size={12} className="text-cyan-500 cursor-help" />
                                         <div className="absolute top-full right-0 mt-3 w-64 p-4 bg-[#0d0d0d] border border-gray-800 rounded-[20px] shadow-3xl opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-all z-[9999] text-left ring-1 ring-white/5">
                                             <p className="text-[10px] font-black text-white uppercase mb-2">Spread APR Change</p>
-                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">Change in spread APR over the past {spreadChangeHours}h. Positive = arbitrage gap widening.</p>
-                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-cyan-400">Δ = Current Spread − Spread ({spreadChangeHours}h ago)</div>
+                                            <p className="text-[9px] text-gray-400 leading-relaxed mb-2">Change in spread APR over the past {spreadChangeHours}h. Shows absolute (Δ) and relative (%Δ) change.</p>
+                                            <div className="font-mono text-[8px] bg-black/50 p-2 rounded-lg border border-white/5 text-cyan-400">Δ = Current − Past | %Δ = Δ / Past × 100</div>
                                             <div className="absolute bottom-full right-1 border-[6px] border-transparent border-b-[#0d0d0d]"></div>
                                         </div>
                                     </div>
@@ -736,6 +711,8 @@ function App() {
                                         className="bg-transparent text-[9px] font-mono text-cyan-500 cursor-pointer outline-none"
                                         onClick={e => e.stopPropagation()}
                                     >
+                                        <option value={1}>1H</option>
+                                        <option value={4}>4H</option>
                                         <option value={6}>6H</option>
                                         <option value={12}>12H</option>
                                         <option value={24}>24H</option>
@@ -841,8 +818,14 @@ function App() {
                                 {dataMode !== 'price' && (
                                 <td className="px-4 py-5 text-center border-l border-gray-900 font-black text-xs">
                                     {row.spreadChange !== null ? (
-                                        <span className={row.spreadChange > 0.01 ? 'text-green-500' : row.spreadChange < -0.01 ? 'text-red-500' : 'text-gray-500'}>
-                                            {row.spreadChange > 0 ? '+' : ''}{row.spreadChange.toFixed(2)}%
+                                        <span className={`flex items-center justify-center gap-1 ${row.spreadChange > 0.5 ? 'text-green-500' : row.spreadChange < -0.5 ? 'text-red-500' : 'text-gray-500'}`}>
+                                            <span className="text-sm">{row.spreadChange > 0.5 ? '↗' : row.spreadChange < -0.5 ? '↘' : '→'}</span>
+                                            <span className="font-mono">{row.spreadChange > 0 ? '+' : ''}{row.spreadChange.toFixed(2)}%</span>
+                                            {row.spreadChangePct !== null && (
+                                                <span className={`text-[9px] opacity-60 ${row.spreadChangePct > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                                    ({row.spreadChangePct > 0 ? '+' : ''}{row.spreadChangePct.toFixed(1)}%)
+                                                </span>
+                                            )}
                                         </span>
                                     ) : (
                                         <span className="text-gray-800/50">--</span>
@@ -921,8 +904,11 @@ function App() {
                         {dataMode !== 'price' && (
                         <div className="mt-1 pt-1 border-t border-gray-900/30 flex justify-between items-center">
                              <div className="text-[7px] font-bold text-gray-700 uppercase">Δ Spread</div>
-                             <div className={`text-[9px] font-black ${row.spreadChange !== null ? (row.spreadChange > 0.01 ? 'text-green-500' : row.spreadChange < -0.01 ? 'text-red-500' : 'text-gray-500') : 'text-gray-800'}`}>
-                                {row.spreadChange !== null ? `${row.spreadChange > 0 ? '+' : ''}${row.spreadChange.toFixed(2)}%` : '--'}
+                             <div className={`flex items-center gap-1 text-[9px] font-black ${row.spreadChange !== null ? (row.spreadChange > 0.5 ? 'text-green-500' : row.spreadChange < -0.5 ? 'text-red-500' : 'text-gray-500') : 'text-gray-800'}`}>
+                                {row.spreadChange !== null ? (
+                                  <><span>{row.spreadChange > 0.5 ? '↗' : row.spreadChange < -0.5 ? '↘' : '→'}</span>
+                                  <span>{row.spreadChange > 0 ? '+' : ''}{row.spreadChange.toFixed(2)}%</span></>
+                                ) : '--'}
                              </div>
                         </div>
                         )}

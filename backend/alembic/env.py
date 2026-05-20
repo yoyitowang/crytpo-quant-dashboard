@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 config = context.config
 
 from backend.app.models.funding_rate import Base
+from backend.app.models.spread_snapshot import SpreadSnapshot  # noqa: F401
 target_metadata = Base.metadata
 
 from backend.app.core.config import settings

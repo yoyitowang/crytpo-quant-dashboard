@@ -3,6 +3,8 @@ from backend.app.services.collector import collector
 from backend.app.services.websocket_manager import ws_manager
 from backend.app.db.session import SessionLocal
 from backend.app.models.funding_rate import FundingRate
+from backend.app.models.spread_snapshot import SpreadSnapshot
+from backend.app.services.aden_api import fetch_funding_rate_history as aden_fetch_history
 from backend.app.dependencies import get_redis, get_symbol_inventory
 from typing import Dict, List, Optional
 import structlog
@@ -426,7 +428,39 @@ async def _live_fetch(exchange: str, symbol: str, days: int) -> list:
     if ex_id == "lighter":
         return await fetch_lighter_history(symbol, days)
 
-    ccxt_map = {'gate': 'gateio', 'aden': 'gateio', 'hyperliquid': 'hyperliquid'}
+    if ex_id == "aden":
+        try:
+            match = re.match(r'^(.*?)(USDT|USDC)$', symbol, re.IGNORECASE)
+            if not match:
+                return []
+            raw_sym = match.group(1).upper() + "_" + match.group(2).upper()
+            url = f"https://api.aden.io/api/v1/dex_futures/usdt/funding_rate_history?symbol={raw_sym}&limit=500"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list) and data:
+                            res = [{
+                                "timestamp": datetime.fromtimestamp(d["fundingTime"] / 1000, tz=timezone.utc).isoformat(),
+                                "rate": float(d["fundingRate"]),
+                            } for d in data if d.get("fundingRate") is not None]
+                            if res:
+                                return sorted(res, key=lambda x: x["timestamp"])
+                    # If public endpoint fails, try authenticated path
+                    logger.info("aden_public_history_empty_trying_auth", symbol=symbol, status=resp.status)
+        except Exception as e:
+            logger.error("aden_public_history_failed", error=str(e)[:200])
+
+        try:
+            auth_data = await aden_fetch_history(symbol)
+            if auth_data:
+                return sorted(auth_data, key=lambda x: x["timestamp"])
+        except Exception as e:
+            logger.error("aden_auth_history_failed", error=str(e)[:200])
+
+        return []
+
+    ccxt_map = {'gate': 'gateio', 'hyperliquid': 'hyperliquid'}
     ccxt_id = ccxt_map.get(ex_id, ex_id)
     if not hasattr(ccxt_async, ccxt_id):
         return []
@@ -652,6 +686,31 @@ async def get_funding_spreads():
                 "spread": rates_sorted[-1]["rate"] - rates_sorted[0]["rate"], "timestamp": datetime.now(timezone.utc).isoformat()
             })
     return sorted(spreads, key=lambda x: x["spread"], reverse=True)
+
+
+@router.get("/analysis/spread-history")
+async def get_spread_history(symbol: str = "", hours: int = 48):
+    """Return historical spread snapshots for one or all symbols."""
+    try:
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        async with SessionLocal() as session:
+            from sqlalchemy import select
+            stmt = select(SpreadSnapshot).where(SpreadSnapshot.timestamp >= since).order_by(SpreadSnapshot.timestamp)
+            if symbol:
+                stmt = stmt.where(SpreadSnapshot.symbol == symbol.upper())
+            rows = (await session.execute(stmt)).scalars().all()
+
+        # Group by symbol as {symbol: [[timestamp_epoch_ms, spread], ...]}
+        result: Dict[str, list] = {}
+        for r in rows:
+            sym = r.symbol
+            if sym not in result:
+                result[sym] = []
+            ts_ms = int(r.timestamp.replace(tzinfo=timezone.utc).timestamp() * 1000)
+            result[sym].append([ts_ms, r.spread])
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _calc_slippage(levels: list, size: float, is_buy: bool) -> dict:

@@ -30,6 +30,7 @@ logger = structlog.get_logger()
 from backend.app.api import endpoints
 from backend.app.services.collector import collector
 from backend.app.models.funding_rate import FundingRate
+from backend.app.models.spread_snapshot import SpreadSnapshot
 from backend.app.db.session import SessionLocal
 from backend.app.services.websocket_manager import ws_manager
 from backend.app.dependencies import set_redis, get_redis, set_symbol_inventory
@@ -162,6 +163,56 @@ async def _metrics_loop():
                 pass
 
 
+async def _spread_snapshotter():
+    """Background task: compute spread APR for all symbols every 5 minutes, store in DB."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    await asyncio.sleep(30)  # initial delay for collector to warm up
+    while True:
+        try:
+            if not _db_enabled:
+                await asyncio.sleep(60)
+                continue
+
+            latest = collector.latest_rates.values()
+            by_symbol: Dict[str, list] = {}
+            for item in latest:
+                sym = item["symbol"]
+                if sym not in by_symbol:
+                    by_symbol[sym] = []
+                by_symbol[sym].append(item)
+
+            now = datetime.now(timezone.utc)
+            rows = []
+            for sym, rates in by_symbol.items():
+                if len(rates) < 2:
+                    continue
+                aprs = []
+                for r in rates:
+                    interval = r.get("interval", 8)
+                    aprs.append(r["rate"] * (24 / interval) * 365)
+                spread = max(aprs) - min(aprs)
+                if spread <= 0:
+                    continue
+                rows.append({
+                    "symbol": sym,
+                    "timestamp": now,
+                    "spread": spread * 100,  # store as percentage
+                    "num_exchanges": len(rates),
+                })
+
+            if rows:
+                async with SessionLocal() as session:
+                    stmt = pg_insert(SpreadSnapshot).values(rows)
+                    stmt = stmt.on_conflict_do_nothing()
+                    await session.execute(stmt)
+                    await session.commit()
+                logger.info("spread_snapshot_taken", symbols=len(rows), num_rates=len(latest))
+        except Exception as e:
+            logger.error("spread_snapshot_error", error=str(e)[:200])
+
+        await asyncio.sleep(300)  # 5 minutes
+
+
 async def db_callback(data):
     """Redis + PostgreSQL 寫入"""
     redis = get_redis()
@@ -275,6 +326,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(prefetch_loop())
 
     asyncio.create_task(_metrics_loop())
+    asyncio.create_task(_spread_snapshotter())
     yield
     collector_task.cancel()
     await r.close()
